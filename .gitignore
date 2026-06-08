@@ -1,0 +1,38 @@
+# ─── PyInstaller build artifacts (regenerated each build) ──────────
+build/
+dist/
+*.spec
+*.spec.bak
+
+# ─── Python bytecode / caches ──────────────────────────────────────
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+
+# ─── Virtual environments (each dev creates their own locally) ─────
+venv/
+.venv/
+env/
+
+# ─── IDE / editor settings (personal, not project) ─────────────────
+.vscode/
+.idea/
+*.sublime-project
+*.sublime-workspace
+
+# ─── OS junk files ─────────────────────────────────────────────────
+Thumbs.db
+Desktop.ini
+.DS_Store
+
+# ─── Live production data (lives on the network share, not in git) ─
+admins.json
+operators.json
+.shipping_draft.json
+.shipping_log.txt
+
+# ─── Local test outputs ────────────────────────────────────────────
+/test_output/
+*.tmp
+*.log
