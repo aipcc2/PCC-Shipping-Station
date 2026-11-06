@@ -23,7 +23,7 @@ You work from a **local clone on your own PC**, not directly on the network shar
 4. Install required Python packages:
         py -3.12 -m pip install pyinstaller pillow python-docx openpyxl python-barcode
 ### Running from source (for testing changes)
-        py -3.12 PCC_Shipping.py
+        py -3.12 app_logic.py
 ### Building the EXE
         build_exe.bat
 
@@ -41,7 +41,11 @@ See [CONTRIBUTING.md](./CONTRIBUTING.md) for the branch and pull request workflo
 
 ## Project files
 
-- `PCC_Shipping.py` — main application source
+- `app_logic.py` — main application source (single file; the EXE is built from it)
+- `PCC Shipping App.spec` — PyInstaller recipe used by `build_exe.bat`
+- `PROJECT_NOTES.md` — dated change log and design notes (read this first)
+- `tests/` — test suites (`python tests/test_slip_labels.py` etc.; set the `SCRIPTS` path at the top of each to your clone)
+- `tools/` — read-only diagnostic scripts
 - `build_exe.bat` — PyInstaller build script
 - `logo.png` — company logo (used at runtime + embedded as fallback)
 - `README.md` — this file

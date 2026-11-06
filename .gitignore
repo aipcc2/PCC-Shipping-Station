@@ -36,3 +36,7 @@ operators.json
 /test_output/
 *.tmp
 *.log
+# The PyInstaller spec IS the build recipe (build_exe.bat runs it)
+!PCC Shipping App.spec
+# Frozen copy of the Apex HTML app (tests/fixtures) holds plaintext PINs + an API key: never commit
+tests/fixtures/
