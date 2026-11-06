@@ -6,7 +6,9 @@ Logo: place logo.png in same folder as PCC_Shipping.exe
 import tkinter as tk
 from tkinter import ttk, messagebox, filedialog
 import shutil, csv, datetime, json, sys, hashlib
+import queue as _queue
 from pathlib import Path
+import portal_upload
 
 PRODUCTION_ROOTS = {
     "Industrial":  r"\\PCC2\PCC-I-Shares\Production\Industrial",
@@ -2056,7 +2058,7 @@ class AdminPanel(tk.Toplevel):
         h=tk.Frame(self,bg=C_DARK); h.pack(fill="x")
         tk.Label(h,text="Admin Panel — Printed Circuits Corp",bg=C_DARK,fg=C_WHITE,font=("Segoe UI",13,"bold")).pack(side="left",padx=20,pady=13)
         tb=tk.Frame(self,bg="#DCDCDC"); tb.pack(fill="x"); self._tb={}
-        for k,l in [("op","  Operators  "),("ad","  Administrators  ")]:
+        for k,l in [("op","  Operators  "),("ad","  Administrators  "),("pu","  Portal upload  ")]:
             b=tk.Button(tb,text=l,relief="flat",cursor="hand2",font=("Segoe UI",10,"bold"),pady=10,command=lambda x=k: self._st(x))
             b.pack(side="left"); self._tb[k]=b
         self._bd=tk.Frame(self,bg=C_BG); self._bd.pack(fill="both",expand=True,padx=24,pady=16)
@@ -2065,7 +2067,44 @@ class AdminPanel(tk.Toplevel):
         for x,b in self._tb.items(): b.config(bg=C_GREEN if x==k else "#DCDCDC",fg=C_WHITE if x==k else C_MID)
         for w in self._bd.winfo_children(): w.destroy()
         if k=="op": self._top()
+        elif k=="pu": self._tpu()
         else: self._tad()
+    def _tpu(self):
+        """Portal upload settings for THIS PC (stored locally, never on the share)."""
+        f=self._bd; c=portal_upload.load_config()
+        tk.Label(f,text="Send CoC and Packing List PDFs to the Customer Portal",bg=C_BG,fg=C_GREEN,font=("Segoe UI",11,"bold")).pack(anchor="w",pady=(0,4))
+        tk.Label(f,text="Industrial jobs only. MAG - ITAR jobs are never sent.\n"
+                 "Station id and key come from the portal admin (one key per PC). They are saved only on this PC.",
+                 bg=C_BG,fg=C_SUBTLE,font=("Segoe UI",9),justify="left").pack(anchor="w",pady=(0,10))
+        self._pu_en=tk.BooleanVar(value=c["enabled"]); self._pu_id=tk.StringVar(value=c["station_id"])
+        self._pu_key=tk.StringVar(value=c["station_key"]); self._pu_url=tk.StringVar(value=c["url"])
+        tk.Checkbutton(f,text="Turn on portal upload for this PC",variable=self._pu_en,bg=C_BG,font=("Segoe UI",10)).pack(anchor="w",pady=(0,6))
+        g=tk.Frame(f,bg=C_BG); g.pack(fill="x")
+        for r,(l,v,kw) in enumerate([("Station id",self._pu_id,{}),("Station key",self._pu_key,{"show":"●"}),("Portal address",self._pu_url,{})]):
+            tk.Label(g,text=l,bg=C_BG,fg=C_MID,font=("Segoe UI",9),width=14,anchor="e").grid(row=r,column=0,padx=(0,8),pady=4)
+            ttk.Entry(g,textvariable=v,font=("Segoe UI",10),width=52,**kw).grid(row=r,column=1,sticky="w",ipady=3)
+        self._pu_msg=tk.Label(f,text="",bg=C_BG,fg=C_SUBTLE,font=("Segoe UI",9),wraplength=600,justify="left"); self._pu_msg.pack(anchor="w",pady=(10,4))
+        br=tk.Frame(f,bg=C_BG); br.pack(fill="x",pady=4)
+        _btn(br,"Test connection",self._pu_test,bg=C_DARK,fg=C_WHITE).pack(side="left")
+        _btn(br,"Save",self._pu_save,bg=C_GREEN,fg=C_WHITE).pack(side="right")
+    def _pu_values(self):
+        return {"enabled":self._pu_en.get(),"station_id":self._pu_id.get().strip(),
+                "station_key":self._pu_key.get().strip(),"url":self._pu_url.get().strip() or portal_upload.DEFAULT_URL}
+    def _pu_test(self):
+        c=self._pu_values()
+        if not c["station_id"] or len(c["station_key"])<24:
+            self._pu_msg.config(text="Enter the station id and its key (at least 24 characters).",fg=C_RED); return
+        self._pu_msg.config(text="Checking…",fg=C_SUBTLE); self.update()
+        try: ok,msg=portal_upload.ping(c)
+        except Exception as e: ok,msg=False,f"{type(e).__name__}: {e}"
+        self._pu_msg.config(text=("✓ " if ok else "✗ ")+msg,fg=C_GREEN if ok else C_RED)
+    def _pu_save(self):
+        c=self._pu_values()
+        if c["enabled"] and not portal_upload.config_ready(c):
+            self._pu_msg.config(text="Can't turn it on yet: the station id, a key of at least 24 characters and an https address are needed.",fg=C_RED); return
+        try: portal_upload.save_config(c)
+        except Exception as e: self._pu_msg.config(text=f"Couldn't save: {e}",fg=C_RED); return
+        self._pu_msg.config(text="Saved. "+("Portal upload is ON for this PC." if c["enabled"] else "Portal upload is OFF for this PC."),fg=C_GREEN)
     def _top(self):
         f=self._bd; tk.Label(f,text="Operator roster",bg=C_BG,fg=C_GREEN,font=("Segoe UI",11,"bold")).pack(anchor="w",pady=(0,8))
         lf=tk.Frame(f,bg=C_WHITE,highlightbackground=C_BORDER,highlightthickness=1); lf.pack(fill="both",expand=True)
@@ -2121,6 +2160,33 @@ class AdminPanel(tk.Toplevel):
     def _p(self): save_admins(self._a); save_operators(self._o); self._os(self._a,self._o)
     def _sc(self): self._p(); self.destroy()
 
+class PortalQueueDialog(tk.Toplevel):
+    """Shows this PC's portal uploads (newest first) with a Retry now button."""
+    LABELS={"pending":"Waiting","done":"Sent","failed":"FAILED","blocked":"Not sent (ITAR guard)"}
+    def __init__(self,parent,uploader):
+        super().__init__(parent); self.title("Portal uploads"); self.geometry("760x420"); self.configure(bg=C_BG)
+        self._up=uploader
+        h=tk.Frame(self,bg=C_GREEN); h.pack(fill="x")
+        tk.Label(h,text="Portal uploads on this PC",bg=C_GREEN,fg=C_WHITE,font=("Segoe UI",12,"bold")).pack(side="left",padx=18,pady=10)
+        bar=tk.Frame(self,bg=C_BG); bar.pack(side="bottom",fill="x",padx=18,pady=10)
+        _btn(bar,"Retry now",self._retry,bg=C_TEAL,fg=C_WHITE).pack(side="left")
+        _btn(bar,"Close",self.destroy,bg="#DDD",fg=C_MID).pack(side="right")
+        cols=("when","what","status","note")
+        self._tv=ttk.Treeview(self,columns=cols,show="headings",height=12)
+        for c,w,t in [("when",120,"Queued"),("what",220,"Document"),("status",130,"Status"),("note",260,"Details")]:
+            self._tv.heading(c,text=t); self._tv.column(c,width=w,anchor="w")
+        self._tv.pack(fill="both",expand=True,padx=18,pady=(10,0))
+        self._fill(); _center(self,parent)
+    def _fill(self):
+        self._tv.delete(*self._tv.get_children())
+        jobs=sorted(portal_upload.load_jobs(),key=lambda j: j.get("created_at",0),reverse=True)
+        for j in jobs[:200]:
+            when=datetime.datetime.fromtimestamp(j.get("created_at",0)).strftime("%m/%d %I:%M %p")
+            self._tv.insert("","end",values=(when,portal_upload.describe(j),self.LABELS.get(j.get("status"),j.get("status")),j.get("last_error","")))
+    def _retry(self):
+        if self._up: self._up.retry_now()
+        self.after(1500,self._fill)
+
 ###############################################################################
 # MAIN APP
 ###############################################################################
@@ -2134,6 +2200,47 @@ class ShippingApp(tk.Tk):
         self.pending_photos=[]; self.serials=[]; self.packing_data=None; self.coc_data=None
         self.loaded_wo=None; self.parsed_info={}
         self._load_logo(); self._build_ui(); self._refresh_operators()
+        self._start_portal_uploader()
+    # ─── Portal upload (portal_upload.py) ───────────────────────────────────
+    # A background thread sends queued PDFs; it reports through a thread-safe queue
+    # that the UI reads every second (tkinter must only be touched from this thread).
+    def _start_portal_uploader(self):
+        self._portal_events=_queue.Queue()
+        try:
+            self._portal=portal_upload.PortalUploader(lambda kind,job: self._portal_events.put((kind,job)))
+            self._portal.start()
+        except Exception:
+            self._portal=None
+        self._portal_tick()
+    def _portal_tick(self):
+        failures=[]
+        try:
+            while True:
+                kind,job=self._portal_events.get_nowait()
+                if kind=="failed" or kind=="blocked": failures.append(job)
+        except _queue.Empty:
+            pass
+        self._portal_refresh_status()
+        for job in failures:
+            messagebox.showwarning("Portal upload failed",
+                f"{portal_upload.describe(job)} was NOT added to the Customer Portal.\n\n"
+                f"Reason: {job.get('last_error') or 'unknown'}\n\n"
+                f"The shipment itself is fine. Tell the office so they can upload it by hand.")
+        self.after(1000,self._portal_tick)
+    def _portal_refresh_status(self):
+        if not hasattr(self,"portal_lbl"): return
+        try:
+            if not portal_upload.config_ready(portal_upload.load_config()):
+                self.portal_lbl.config(text="Portal upload: off",fg=C_SUBTLE); return
+            s=portal_upload.summary()
+        except Exception:
+            return
+        parts=[f"✓ {s['sent_today']} sent today"]
+        if s["waiting"]: parts.append(f"{s['waiting']} waiting")
+        if s["failed"]: parts.append(f"⚠ {s['failed']} failed")
+        self.portal_lbl.config(text="Portal: "+"  ·  ".join(parts),fg=C_RED if s["failed"] else (C_AMBER if s["waiting"] else C_GREEN))
+    def _portal_window(self):
+        PortalQueueDialog(self,getattr(self,"_portal",None))
     def _load_logo(self):
         self._logo_img=None
         try:
@@ -2260,6 +2367,9 @@ class ShippingApp(tk.Tk):
         inner=tk.Frame(f,bg=C_BG); inner.pack()  # centered group
         _btn(inner,"Save Shipment",self._save_draft,bg=C_TEAL,fg=C_WHITE,font_size=12,padx=32,pady=8).pack(side="left",padx=6)
         _btn(inner,"✓   Save and Close Shipment",self._fin,bg=C_GREEN,fg=C_WHITE,font_size=12,padx=32,pady=8).pack(side="left",padx=6)
+        st=tk.Frame(p,bg=C_BG); st.pack(fill="x")
+        self.portal_lbl=tk.Label(st,text="Portal upload: off",bg=C_BG,fg=C_SUBTLE,font=("Segoe UI",9),cursor="hand2")
+        self.portal_lbl.pack(side="right"); self.portal_lbl.bind("<Button-1>",lambda e: self._portal_window())
     def _sd(self,d):
         self.division_var.set(d)
         self.btn_ind.config(bg=C_GREEN if d=="Industrial" else "#E0E0E0",fg=C_WHITE if d=="Industrial" else C_MID)
@@ -2748,6 +2858,16 @@ class ShippingApp(tk.Tk):
                 pl_err=f"{type(e).__name__}: {e}"
                 log(f"PACKING LIST FAILED: {pl_err}\n{traceback.format_exc()}")
 
+        # ───── Customer Portal: queue the CoC / Packing List PDFs (Industrial only).
+        # Only writes a small job file; a background thread makes the PDFs and uploads them.
+        # Never blocks or fails the close. MAG - ITAR jobs are refused inside enqueue_shipment().
+        portal_status, portal_msg = portal_upload.enqueue_shipment(
+            div, self.wo_folder, wo, eng_safe,
+            coc_xlsx=cf, coc_data=self.coc_data,
+            packing_xlsx=sf, packing_data=self.packing_data,
+            serials=self.serials)
+        log(f"PORTAL {portal_status}: {portal_msg}")
+
         # ───── Build summary, surfacing real errors prominently
         n_serials=len(self.serials)
         errors=[]
@@ -2789,6 +2909,7 @@ class ShippingApp(tk.Tk):
             f"Serials Word:    {'✓' if wp else '—'}",
             f"COC:             {status_label(bool(self.coc_data), cf, coc_cancelled, coc_skipped)}",
             f"Packing List:    {status_label(bool(self.packing_data), sf, pl_cancelled, pl_skipped)}",
+            f"Customer Portal: {portal_msg}",
         ]
         if errors:
             msg_lines += ["", "ERRORS:"] + errors

@@ -42,8 +42,29 @@ See [CONTRIBUTING.md](./CONTRIBUTING.md) for the branch and pull request workflo
 ## Project files
 
 - `PCC_Shipping.py` — main application source
+- `portal_upload.py` — sends CoC / Packing List PDFs to the PCC Customer Portal (see below)
+- `tests/` — unit tests: `py -3.12 -m unittest discover -s tests -v`
 - `build_exe.bat` — PyInstaller build script
 - `logo.png` — company logo (used at runtime + embedded as fallback)
 - `README.md` — this file
 - `CONTRIBUTING.md` — how to contribute changes
 - `.gitignore` — files Git should ignore (build output, caches, etc.)
+
+## Customer Portal upload
+
+After **Save and Close**, the CoC and Packing List are also sent to the PCC Customer Portal as PDFs, so the
+customer sees them on their order. Details are in `portal_upload.py`; in short:
+
+- **Industrial jobs only. MAG - ITAR jobs are never sent.** The app refuses them when the shipment is
+  queued, again before the PDF is made, and again right before upload (division must be exactly
+  "Industrial", files must sit under the Industrial production folder, and no folder name, file name or
+  field may mention ITAR / USML / export controlled). The portal refuses them too.
+- **Never blocks shipping.** Close only writes a small job file on the PC. A background thread makes the
+  PDF with Excel (same look as the printed form; the PDF is saved next to the .xlsx in the WO folder) and
+  uploads it. If the portal or network is down it retries (1 min, 5 min, 15 min, then hourly, up to 7 days).
+- **Visible status.** The footer shows "Portal: ✓ 3 sent today · 1 waiting · ⚠ 1 failed"; click it for
+  the list and **Retry now**. A failed upload pops up a warning so the office can upload it by hand.
+- **Off until set up on each PC.** Admin → Portal upload: station id + station key (from the portal
+  admin), Test connection, turn on, Save. Stored only on that PC in
+  `%LOCALAPPDATA%\PCC Shipping\portal_upload.json`; the queue is in `%LOCALAPPDATA%\PCC Shipping\portal_queue\`.
+- Needs Excel on the shipping PC (already used for the .xlsx files). No new Python packages.
