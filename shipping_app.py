@@ -9,6 +9,10 @@ import shutil, csv, datetime, json, sys, hashlib
 import queue as _queue
 from pathlib import Path
 import portal_upload
+try:
+    import pdf_docs  # needs reportlab (build_exe.bat installs it)
+except ImportError:
+    pdf_docs = None  # the app still runs; the close summary says the PDFs failed
 
 PRODUCTION_ROOTS = {
     "Industrial":  r"\\PCC2\PCC-I-Shares\Production\Industrial",
@@ -2587,6 +2591,19 @@ class ShippingApp(tk.Tk):
         self.lbl_eng.config(text="—",fg=C_DARK); self.lbl_fp.config(text="—",fg=C_DARK)
         self.lbl_st.config(text="Scan a work order to begin",fg=C_SUBTLE)
         self._uc(); self.wo_entry.focus_set()
+    def _write_pdf(self, label, make, log):
+        """Writes the PDF copy of a document next to its .xlsx. Never raises: returns (path, error)."""
+        try:
+            if pdf_docs is None:
+                raise RuntimeError("PDF library (reportlab) is not installed")
+            path = make()
+            log(f"{label} PDF written: {path}")
+            return path, None
+        except Exception as e:
+            import traceback as _tb
+            err = f"{type(e).__name__}: {e}"
+            log(f"{label} PDF FAILED: {err} | {_tb.format_exc()}")
+            return None, err
     def _write_with_retry(self, file_label, target_path, write_callable, log):
         """
         Call write_callable(). If it raises PermissionError (file open in Excel
@@ -2758,6 +2775,7 @@ class ShippingApp(tk.Tk):
 
         # ───── Serials xlsx — always a NEW file (no append, no lock conflicts)
         serials_file=None; serials_err=None; serials_skipped=False; serials_cancelled=False
+        serials_pdf=None; serials_pdf_err=None
         if self.serials:
             fdate = fmt_file_date()
             target_preview = self.serials_path / f"{eng_safe}-{fdate} serials.xlsx"
@@ -2768,6 +2786,8 @@ class ShippingApp(tk.Tk):
             if status == "ok":
                 serials_file = value
                 log(f"SERIALS xlsx written: {serials_file}")
+                serials_pdf, serials_pdf_err = self._write_pdf("SERIALS",
+                    lambda: pdf_docs.write_serials_pdf(serials_file, eng_safe, wo, self.serials, fmt_date(), fmt_time(), op), log)
             elif status == "skip":
                 serials_skipped = True
             elif status == "cancel":
@@ -2801,6 +2821,7 @@ class ShippingApp(tk.Tk):
 
         # ───── COC xlsx — wrap with retry-on-lock + skip handling
         cf=None; coc_err=None; coc_cancelled=False; coc_skipped=False
+        coc_pdf=None; coc_pdf_err=None
         if self.coc_data:
             try:
                 cp=self.wo_folder/COC_FOLDER
@@ -2814,6 +2835,8 @@ class ShippingApp(tk.Tk):
                     if status == "ok":
                         cf = value
                         log(f"COC written: {cf}")
+                        coc_pdf, coc_pdf_err = self._write_pdf("COC",
+                            lambda: pdf_docs.write_coc_pdf(cf, self.coc_data, self.serials), log)
                     elif status == "skip":
                         coc_skipped = True
                     elif status == "cancel":
@@ -2831,6 +2854,7 @@ class ShippingApp(tk.Tk):
 
         # ───── Packing List xlsx — always a NEW file
         sf=None; pl_err=None; pl_cancelled=False; pl_skipped=False
+        pl_pdf=None; pl_pdf_err=None
         if self.packing_data:
             try:
                 plp=self.wo_folder/PACKING_LIST_FOLDER
@@ -2844,6 +2868,8 @@ class ShippingApp(tk.Tk):
                     if status == "ok":
                         sf = value
                         log(f"PACKING LIST written: {sf}")
+                        pl_pdf, pl_pdf_err = self._write_pdf("PACKING LIST",
+                            lambda: pdf_docs.write_packing_list_pdf(sf, self.packing_data, self.serials, logo_path=str(LOGO_PATH)), log)
                     elif status == "skip":
                         pl_skipped = True
                     elif status == "cancel":
@@ -2858,14 +2884,14 @@ class ShippingApp(tk.Tk):
                 pl_err=f"{type(e).__name__}: {e}"
                 log(f"PACKING LIST FAILED: {pl_err}\n{traceback.format_exc()}")
 
-        # ───── Customer Portal: queue the CoC / Packing List PDFs (Industrial only).
-        # Only writes a small job file; a background thread makes the PDFs and uploads them.
+        # ───── Customer Portal: queue the CoC / Packing List / Serial list PDFs (Industrial only).
+        # Only writes a small job file; a background thread uploads them.
         # Never blocks or fails the close. MAG - ITAR jobs are refused inside enqueue_shipment().
         portal_status, portal_msg = portal_upload.enqueue_shipment(
             div, self.wo_folder, wo, eng_safe,
-            coc_xlsx=cf, coc_data=self.coc_data,
-            packing_xlsx=sf, packing_data=self.packing_data,
-            serials=self.serials)
+            coc_pdf=coc_pdf, coc_data=self.coc_data,
+            packing_pdf=pl_pdf, packing_data=self.packing_data,
+            serials=self.serials, serials_pdf=serials_pdf)
         log(f"PORTAL {portal_status}: {portal_msg}")
 
         # ───── Build summary, surfacing real errors prominently
@@ -2875,6 +2901,9 @@ class ShippingApp(tk.Tk):
         if coc_err:     errors.append(f"  COC: {coc_err}")
         if pl_err:      errors.append(f"  Packing List: {pl_err}")
         if wp_err:      errors.append(f"  Serials Word: {wp_err}")
+        if serials_pdf_err: errors.append(f"  Serials PDF: {serials_pdf_err}")
+        if coc_pdf_err:     errors.append(f"  COC PDF: {coc_pdf_err}")
+        if pl_pdf_err:      errors.append(f"  Packing List PDF: {pl_pdf_err}")
 
         # Build status label per file. Possible states:
         # ✓ written / — n/a (no data) / — skipped (user) / FAILED (unhandled error)
@@ -2884,6 +2913,10 @@ class ShippingApp(tk.Tk):
             if cancelled: return "— skipped (append/overwrite cancelled)"
             if skipped:   return "— skipped (file in use)"
             return "FAILED"
+
+        def pdf_note(xlsx, pdf):
+            if not xlsx: return ""
+            return "  + PDF ✓" if pdf else "  + PDF FAILED"
 
         # Critical writes succeeded? Skipped files count as user-acknowledged,
         # not failures. They will be treated like done for draft-cleanup purposes.
@@ -2905,10 +2938,10 @@ class ShippingApp(tk.Tk):
         if photos_failed:
             msg_lines.append(f"  • {len(photos_failed)} photo(s) FAILED to move")
         msg_lines += [
-            f"Serials xlsx:    {status_label(bool(self.serials), serials_file, False, serials_skipped)}",
+            f"Serials xlsx:    {status_label(bool(self.serials), serials_file, False, serials_skipped)}{pdf_note(serials_file, serials_pdf)}",
             f"Serials Word:    {'✓' if wp else '—'}",
-            f"COC:             {status_label(bool(self.coc_data), cf, coc_cancelled, coc_skipped)}",
-            f"Packing List:    {status_label(bool(self.packing_data), sf, pl_cancelled, pl_skipped)}",
+            f"COC:             {status_label(bool(self.coc_data), cf, coc_cancelled, coc_skipped)}{pdf_note(cf, coc_pdf)}",
+            f"Packing List:    {status_label(bool(self.packing_data), sf, pl_cancelled, pl_skipped)}{pdf_note(sf, pl_pdf)}",
             f"Customer Portal: {portal_msg}",
         ]
         if errors:

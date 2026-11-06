@@ -1,18 +1,18 @@
 """
-Sends shipment CoC and Packing List PDFs to the PCC Customer Portal.
+Sends shipment CoC, Packing List and Serial list PDFs to the PCC Customer Portal.
 
 How it works
-  1. After Save and Close writes the CoC / Packing List .xlsx, the app calls enqueue_shipment().
-     That only writes a small job file on this PC, so shipping is never slowed down or blocked.
-  2. A background thread (PortalUploader) picks up each job: it turns the .xlsx into a .pdf next to it
-     (Excel does the conversion, so the PDF looks exactly like the printed form), then sends the PDF to
-     the portal's ingest-shipping-docs function with this station's id and key.
+  1. Save and Close writes each document as .xlsx AND .pdf (pdf_docs.py draws the PDF; no Excel
+     needed), then calls enqueue_shipment(). That only writes a small job file on this PC, so shipping
+     is never slowed down or blocked.
+  2. A background thread (PortalUploader) picks up each job and sends the PDF to the portal's
+     ingest-shipping-docs function with this station's id and key.
   3. If the portal or the network is down, the job waits and retries (1 min, 5 min, 15 min, then
      hourly, for up to 7 days). Jobs the portal refuses for a reason that won't fix itself are marked
      failed and shown to the operator.
 
 ITAR (hard rule): nothing from a MAG - ITAR job is ever sent. The guard (itar_reason) runs when the job
-is queued, again before the PDF is made, and again right before upload, so even an edited queue file
+is queued, again when the worker picks it up, and again right before upload, so even an edited queue file
 can't get an ITAR job out. The portal refuses ITAR jobs as well.
 
 Settings live on each PC (never on the network share, never in git):
@@ -24,8 +24,6 @@ import datetime
 import json
 import os
 import re
-import subprocess
-import sys
 import threading
 import time
 import urllib.error
@@ -40,12 +38,12 @@ ITAR_ROOT = r"\\PCC2\PCC-I-Shares\Production\MAG - ITAR"
 
 RETRY_DELAYS = [60, 300, 900, 3600]   # seconds; after the last one, hourly
 GIVE_UP_AFTER = 7 * 24 * 3600         # a job older than this is marked failed
-EXPORT_TIMEOUT = 120                  # seconds Excel gets to make one PDF
 HTTP_TIMEOUT = 60
 
 DOC_COC = "CoC"
 DOC_PACKING = "Packing slip"
 DOC_SERIALS = "Serial list"
+LABELS = {DOC_COC: "CoC", DOC_PACKING: "Packing List", DOC_SERIALS: "Serial list"}
 
 
 def local_dir():
@@ -117,7 +115,7 @@ class ItarBlocked(Exception):
 def _check_job(job, industrial_root=INDUSTRIAL_ROOT, itar_root=ITAR_ROOT):
     meta = job.get("meta") or {}
     reason = itar_reason(job.get("division"),
-                         paths=[job.get("wo_folder"), job.get("xlsx_path"), job.get("pdf_path")],
+                         paths=[job.get("wo_folder"), job.get("pdf_path")],
                          texts=list(meta.values()),
                          industrial_root=industrial_root, itar_root=itar_root)
     if reason:
@@ -184,13 +182,12 @@ def load_jobs(qdir=None):
     return jobs
 
 
-def enqueue_shipment(division, wo_folder, wo, eng, coc_xlsx=None, coc_data=None,
-                     packing_xlsx=None, packing_data=None, serials=None, serials_xlsx=None,
-                     send_serials=False, config=None, qdir=None,
-                     industrial_root=INDUSTRIAL_ROOT, itar_root=ITAR_ROOT):
+def enqueue_shipment(division, wo_folder, wo, eng, coc_pdf=None, coc_data=None,
+                     packing_pdf=None, packing_data=None, serials=None, serials_pdf=None,
+                     config=None, qdir=None, industrial_root=INDUSTRIAL_ROOT, itar_root=ITAR_ROOT):
     """
-    Queues the shipment's PDFs for the portal. Never raises, never blocks.
-    Returns (status, message) for the Close summary:
+    Queues the shipment's PDFs (already written next to the .xlsx files) for the portal.
+    Never raises, never blocks. Returns (status, message) for the Close summary:
       ("queued", "...")   jobs written; the background uploader will send them
       ("blocked", "...")  ITAR / not allowed: nothing queued
       ("off", "...")      upload not turned on for this PC
@@ -200,8 +197,8 @@ def enqueue_shipment(division, wo_folder, wo, eng, coc_xlsx=None, coc_data=None,
     try:
         coc_data = coc_data or {}
         packing_data = packing_data or {}
-        files = [p for p in (coc_xlsx, packing_xlsx, serials_xlsx if send_serials else None) if p]
-        reason = itar_reason(division, paths=[wo_folder] + files,
+        docs = [(p, t) for p, t in ((coc_pdf, DOC_COC), (packing_pdf, DOC_PACKING), (serials_pdf, DOC_SERIALS)) if p]
+        reason = itar_reason(division, paths=[wo_folder] + [p for p, _ in docs],
                              texts=[wo, eng, coc_data.get("po"), packing_data.get("po"), packing_data.get("packing_no")],
                              industrial_root=industrial_root, itar_root=itar_root)
         if reason:
@@ -209,8 +206,8 @@ def enqueue_shipment(division, wo_folder, wo, eng, coc_xlsx=None, coc_data=None,
         config = config if config is not None else load_config()
         if not config_ready(config):
             return ("off", "Portal upload is off on this PC.")
-        if not files:
-            return ("none", "No CoC or Packing List to send.")
+        if not docs:
+            return ("none", "No PDFs to send.")
         po = (coc_data.get("po") or packing_data.get("po") or "").strip()
         ship_date = (coc_data.get("ship_date") or packing_data.get("date") or "").strip()
         meta = {
@@ -222,17 +219,13 @@ def enqueue_shipment(division, wo_folder, wo, eng, coc_xlsx=None, coc_data=None,
             "serials": ", ".join(serials or []),
         }
         queued = []
-        for path, doc_type in ((coc_xlsx, DOC_COC), (packing_xlsx, DOC_PACKING),
-                               (serials_xlsx if send_serials else None, DOC_SERIALS)):
-            if not path:
-                continue
+        for path, doc_type in docs:
             job = {
                 "id": uuid.uuid4().hex,
                 "created_at": _now(),
                 "division": division,
                 "wo_folder": str(wo_folder),
-                "xlsx_path": str(path),
-                "pdf_path": str(Path(path).with_suffix(".pdf")),
+                "pdf_path": str(path),
                 "doc_type": doc_type,
                 "meta": meta,
                 "attempts": 0,
@@ -241,44 +234,10 @@ def enqueue_shipment(division, wo_folder, wo, eng, coc_xlsx=None, coc_data=None,
                 "last_error": "",
             }
             _write_job(job, qdir)
-            queued.append({DOC_COC: "CoC", DOC_PACKING: "Packing List", DOC_SERIALS: "Serial list"}[doc_type])
+            queued.append(LABELS[doc_type])
         return ("queued", f"Sending to the portal: {', '.join(queued)}.")
     except Exception as e:  # shipping must never fail because of the portal
         return ("error", f"Couldn't queue the portal upload ({type(e).__name__}: {e}). Shipping is not affected.")
-
-
-###############################################################################
-# PDF EXPORT (Excel)
-###############################################################################
-
-_EXPORT_PS = r"""
-$ErrorActionPreference = 'Stop'
-$x = New-Object -ComObject Excel.Application
-try {
-  $x.Visible = $false; $x.DisplayAlerts = $false; $x.ScreenUpdating = $false; $x.AskToUpdateLinks = $false
-  $wb = $x.Workbooks.Open($env:PCC_XLSX, 0, $true)
-  try { $wb.ExportAsFixedFormat(0, $env:PCC_PDF, 0, $true, $false) } finally { $wb.Close($false) }
-} finally {
-  $x.Quit()
-  [void][System.Runtime.InteropServices.Marshal]::ReleaseComObject($x)
-}
-"""
-
-
-def export_pdf(xlsx_path, pdf_path, timeout=EXPORT_TIMEOUT):
-    """Makes pdf_path from xlsx_path with Excel (through PowerShell, so no extra Python packages)."""
-    if Path(pdf_path).exists() and Path(pdf_path).stat().st_size > 0:
-        return pdf_path
-    if not Path(xlsx_path).exists():
-        raise FileNotFoundError(f"The .xlsx is gone: {xlsx_path}")
-    env = dict(os.environ, PCC_XLSX=str(xlsx_path), PCC_PDF=str(pdf_path))
-    flags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
-    r = subprocess.run(["powershell", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-Command", _EXPORT_PS],
-                       env=env, capture_output=True, text=True, timeout=timeout, creationflags=flags)
-    if r.returncode != 0 or not Path(pdf_path).exists():
-        msg = (r.stderr or r.stdout or "").strip().splitlines()
-        raise RuntimeError("Excel couldn't make the PDF: " + (msg[-1] if msg else f"exit code {r.returncode}"))
-    return pdf_path
 
 
 ###############################################################################
@@ -367,22 +326,19 @@ def upload_job(job, config, send=http_send, industrial_root=INDUSTRIAL_ROOT, ita
     return outcome, msg, resp
 
 
-def process_job(job, config, send=http_send, export=export_pdf, now=None, qdir=None,
+def process_job(job, config, send=http_send, now=None, qdir=None,
                 industrial_root=INDUSTRIAL_ROOT, itar_root=ITAR_ROOT):
-    """
-    Runs one pending job: guard -> PDF -> upload -> save the result. Returns the updated job.
-    Never raises (except on programming errors in tests).
-    """
+    """Runs one pending job: guard -> upload -> save the result. Returns the updated job. Never raises."""
     now = now if now is not None else _now()
     try:
         _check_job(job, industrial_root, itar_root)
-        export(job["xlsx_path"], job["pdf_path"])
-        _check_job(job, industrial_root, itar_root)
+        if not Path(job["pdf_path"]).is_file():
+            raise FileNotFoundError(f"The PDF isn't there any more: {job['pdf_path']}")
         outcome, msg, resp = upload_job(job, config, send, industrial_root, itar_root)
     except ItarBlocked as e:
         outcome, msg, resp = "blocked", f"Not sent: {e}", None
-    except subprocess.TimeoutExpired:
-        outcome, msg, resp = "retry", "Excel took too long to make the PDF.", None
+    except FileNotFoundError as e:
+        outcome, msg, resp = "failed", str(e), None
     except Exception as e:
         outcome, msg, resp = "retry", f"{type(e).__name__}: {e}", None
     job["attempts"] = job.get("attempts", 0) + 1
@@ -406,7 +362,7 @@ def process_job(job, config, send=http_send, export=export_pdf, now=None, qdir=N
 
 def describe(job):
     m = job.get("meta") or {}
-    kind = {DOC_COC: "CoC", DOC_PACKING: "Packing List", DOC_SERIALS: "Serial list"}.get(job.get("doc_type"), "Document")
+    kind = LABELS.get(job.get("doc_type"), "Document")
     return f"{kind} for WO {m.get('work_order', '?')}"
 
 
@@ -473,8 +429,3 @@ def summary(jobs=None):
     sent_today = sum(1 for j in jobs if j.get("status") == "done"
                      and datetime.date.fromtimestamp(j.get("last_try_at", 0)) == today)
     return {"waiting": waiting, "failed": failed, "sent_today": sent_today}
-
-
-if __name__ == "__main__" and len(sys.argv) == 3:
-    # Manual check: py portal_upload.py <file.xlsx> <file.pdf>
-    print(export_pdf(sys.argv[1], sys.argv[2]))

@@ -1,6 +1,6 @@
 """
 Tests for portal_upload.py. Run from the repo folder:   py -m unittest discover -s tests -v
-No network, no Excel: uploads and PDF export are replaced with fakes.
+No network: uploads are replaced with a fake.
 """
 import json
 import os
@@ -31,11 +31,6 @@ class Recorder:
         return self.status, self.body
 
 
-def fake_export(xlsx, pdf):
-    Path(pdf).write_bytes(b"%PDF-1.7 test")
-    return pdf
-
-
 class Env(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
@@ -52,14 +47,14 @@ class Env(unittest.TestCase):
         wf = root / customer / job / "Production Data" / wo
         (wf / "Certificate of Compliance").mkdir(parents=True)
         (wf / "Packing List").mkdir(parents=True)
-        coc = wf / "Certificate of Compliance" / "4099-11-5-26-COC.xlsx"
-        pl = wf / "Packing List" / "4099-11-5-26-Packing_List.xlsx"
-        coc.write_bytes(b"xlsx")
-        pl.write_bytes(b"xlsx")
+        coc = wf / "Certificate of Compliance" / "4099-11-5-26-COC.pdf"
+        pl = wf / "Packing List" / "4099-11-5-26-Packing_List.pdf"
+        coc.write_bytes(b"%PDF-1.7 test")
+        pl.write_bytes(b"%PDF-1.7 test")
         return wf, coc, pl
 
     def enqueue(self, division, wf, coc, pl, **kw):
-        return pu.enqueue_shipment(division, wf, wf.name, "4099", coc_xlsx=coc, coc_data=COC, packing_xlsx=pl,
+        return pu.enqueue_shipment(division, wf, wf.name, "4099", coc_pdf=coc, coc_data=COC, packing_pdf=pl,
                                    packing_data=PL, serials=["SN1", "SN2"], config=kw.pop("config", CONFIG),
                                    qdir=self.q, **self.roots, **kw)
 
@@ -116,12 +111,10 @@ class ItarGuardTests(Env):
         iwf, icoc, ipl = self.wo(self.itar)
         send = Recorder()
         for job in pu.load_jobs(self.q):
-            job["xlsx_path"] = str(icoc)
-            job["pdf_path"] = str(icoc.with_suffix(".pdf"))
-            job = pu.process_job(job, CONFIG, send=send, export=fake_export, qdir=self.q, **self.roots)
+            job["pdf_path"] = str(icoc)
+            job = pu.process_job(job, CONFIG, send=send, qdir=self.q, **self.roots)
             self.assertEqual(job["status"], "blocked")
         self.assertEqual(send.calls, [])
-        self.assertFalse(icoc.with_suffix(".pdf").exists(), "no PDF may be made for an ITAR job")
 
     def test_edited_division_cannot_upload(self):
         wf, coc, pl = self.wo(self.ind)
@@ -129,12 +122,12 @@ class ItarGuardTests(Env):
         send = Recorder()
         for job in pu.load_jobs(self.q):
             job["division"] = "MAG - ITAR"
-            self.assertEqual(pu.process_job(job, CONFIG, send=send, export=fake_export, qdir=self.q, **self.roots)["status"], "blocked")
+            self.assertEqual(pu.process_job(job, CONFIG, send=send, qdir=self.q, **self.roots)["status"], "blocked")
         self.assertEqual(send.calls, [])
 
     def test_upload_job_itself_refuses_itar(self):
         iwf, icoc, ipl = self.wo(self.itar)
-        job = {"division": "MAG - ITAR", "wo_folder": str(iwf), "xlsx_path": str(icoc), "pdf_path": str(icoc.with_suffix(".pdf")),
+        job = {"division": "MAG - ITAR", "wo_folder": str(iwf), "pdf_path": str(icoc),
                "doc_type": "CoC", "meta": {}}
         send = Recorder()
         with self.assertRaises(pu.ItarBlocked):
@@ -143,12 +136,15 @@ class ItarGuardTests(Env):
 
 
 class QueueTests(Env):
-    def test_queues_coc_and_packing_list(self):
+    def test_queues_coc_packing_list_and_serial_list(self):
         wf, coc, pl = self.wo(self.ind)
-        status, msg = self.enqueue("Industrial", wf, coc, pl)
+        sl = wf / "4099-11-5-26 serials.pdf"
+        sl.write_bytes(b"%PDF-1.7 test")
+        status, msg = self.enqueue("Industrial", wf, coc, pl, serials_pdf=sl)
         self.assertEqual(status, "queued")
+        self.assertEqual(msg, "Sending to the portal: CoC, Packing List, Serial list.")
         jobs = sorted(pu.load_jobs(self.q), key=lambda j: j["doc_type"])
-        self.assertEqual([j["doc_type"] for j in jobs], ["CoC", "Packing slip"])
+        self.assertEqual([j["doc_type"] for j in jobs], ["CoC", "Packing slip", "Serial list"])
         self.assertEqual(jobs[0]["meta"], {"work_order": "16691.1", "engineering_number": "4099", "po_number": "2859984-1",
                                            "packing_list_no": "PL-2207", "ship_date": "11/5/2026", "serials": "SN1, SN2"})
         self.assertTrue(jobs[0]["pdf_path"].endswith("4099-11-5-26-COC.pdf"))
@@ -161,7 +157,7 @@ class QueueTests(Env):
         self.assertEqual(pu.load_jobs(self.q), [])
 
     def test_never_raises(self):
-        status, msg = pu.enqueue_shipment("Industrial", None, None, None, coc_xlsx=object(), config=CONFIG, qdir=self.q, **self.roots)
+        status, msg = pu.enqueue_shipment("Industrial", None, None, None, coc_pdf=object(), config=CONFIG, qdir=self.q, **self.roots)
         self.assertIn(status, ("blocked", "error"))
 
 
@@ -170,7 +166,7 @@ class UploadTests(Env):
         wf, coc, pl = self.wo(self.ind)
         self.enqueue("Industrial", wf, coc, None)
         job = pu.load_jobs(self.q)[0]
-        return pu.process_job(job, CONFIG, send=send, export=fake_export, now=now, qdir=self.q, **self.roots)
+        return pu.process_job(job, CONFIG, send=send, now=now, qdir=self.q, **self.roots)
 
     def test_success_sends_pdf_with_station_key_and_fields(self):
         send = Recorder()
@@ -207,19 +203,24 @@ class UploadTests(Env):
         self.enqueue("Industrial", wf, coc, None)
         job = pu.load_jobs(self.q)[0]
         job["created_at"] -= 8 * 86400
-        job = pu.process_job(job, CONFIG, send=Recorder(status=503, body={}), export=fake_export, qdir=self.q, **self.roots)
+        job = pu.process_job(job, CONFIG, send=Recorder(status=503, body={}), qdir=self.q, **self.roots)
         self.assertEqual(job["status"], "failed")
         self.assertIn("7 days", job["last_error"])
 
-    def test_excel_failure_retries(self):
-        def broken(x, p):
-            raise RuntimeError("Excel couldn't make the PDF")
+    def test_missing_pdf_fails_without_sending(self):
         wf, coc, pl = self.wo(self.ind)
         self.enqueue("Industrial", wf, coc, None)
+        coc.unlink()
         send = Recorder()
-        job = pu.process_job(pu.load_jobs(self.q)[0], CONFIG, send=send, export=broken, qdir=self.q, **self.roots)
-        self.assertEqual(job["status"], "pending")
+        job = pu.process_job(pu.load_jobs(self.q)[0], CONFIG, send=send, qdir=self.q, **self.roots)
+        self.assertEqual(job["status"], "failed")
         self.assertEqual(send.calls, [])
+
+    def test_upload_error_retries(self):
+        def boom(url, headers, body):
+            raise OSError("network down")
+        job = self.run_one(boom)
+        self.assertEqual(job["status"], "pending")
 
     def test_classify(self):
         self.assertEqual(pu.classify(200, {"ok": True}), "done")

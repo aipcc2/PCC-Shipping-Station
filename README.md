@@ -21,7 +21,7 @@ You work from a **local clone on your own PC**, not directly on the network shar
 2. Install [Git for Windows](https://git-scm.com/download/win) and [GitHub Desktop](https://desktop.github.com)
 3. Clone this repo to `C:\dev\pcc-shipping-station\`
 4. Install required Python packages:
-        py -3.12 -m pip install pyinstaller pillow python-docx openpyxl python-barcode
+        py -3.12 -m pip install pyinstaller pillow python-docx openpyxl python-barcode reportlab
 ### Running from source (for testing changes)
         py -3.12 PCC_Shipping.py
 ### Building the EXE
@@ -42,7 +42,8 @@ See [CONTRIBUTING.md](./CONTRIBUTING.md) for the branch and pull request workflo
 ## Project files
 
 - `PCC_Shipping.py` — main application source
-- `portal_upload.py` — sends CoC / Packing List PDFs to the PCC Customer Portal (see below)
+- `pdf_docs.py` — draws the PDF copy of the CoC, Packing List and Serial list (no Excel needed)
+- `portal_upload.py` — sends those PDFs to the PCC Customer Portal (see below)
 - `tests/` — unit tests: `py -3.12 -m unittest discover -s tests -v`
 - `build_exe.bat` — PyInstaller build script
 - `logo.png` — company logo (used at runtime + embedded as fallback)
@@ -50,21 +51,25 @@ See [CONTRIBUTING.md](./CONTRIBUTING.md) for the branch and pull request workflo
 - `CONTRIBUTING.md` — how to contribute changes
 - `.gitignore` — files Git should ignore (build output, caches, etc.)
 
-## Customer Portal upload
+## PDFs and the Customer Portal upload
 
-After **Save and Close**, the CoC and Packing List are also sent to the PCC Customer Portal as PDFs, so the
+**PDFs.** On **Save and Close** the app writes every document twice: the .xlsx as before, and a .pdf with
+the same name in the same folder (`4099-11-5-26-COC.xlsx` + `4099-11-5-26-COC.pdf`). `pdf_docs.py` draws
+the PDFs itself with reportlab, so the shipping PCs don't need Excel. A PDF that fails shows in the close
+summary ("+ PDF FAILED") but never stops the close.
+
+**Portal upload.** The CoC, Packing List and Serial list PDFs are then sent to the PCC Customer Portal, so the
 customer sees them on their order. Details are in `portal_upload.py`; in short:
 
 - **Industrial jobs only. MAG - ITAR jobs are never sent.** The app refuses them when the shipment is
-  queued, again before the PDF is made, and again right before upload (division must be exactly
+  queued, again when the uploader picks the job up, and again right before upload (division must be exactly
   "Industrial", files must sit under the Industrial production folder, and no folder name, file name or
   field may mention ITAR / USML / export controlled). The portal refuses them too.
-- **Never blocks shipping.** Close only writes a small job file on the PC. A background thread makes the
-  PDF with Excel (same look as the printed form; the PDF is saved next to the .xlsx in the WO folder) and
-  uploads it. If the portal or network is down it retries (1 min, 5 min, 15 min, then hourly, up to 7 days).
+- **Never blocks shipping.** Close only writes a small job file on the PC; a background thread uploads it.
+  If the portal or network is down it retries (1 min, 5 min, 15 min, then hourly, up to 7 days).
 - **Visible status.** The footer shows "Portal: ✓ 3 sent today · 1 waiting · ⚠ 1 failed"; click it for
   the list and **Retry now**. A failed upload pops up a warning so the office can upload it by hand.
 - **Off until set up on each PC.** Admin → Portal upload: station id + station key (from the portal
   admin), Test connection, turn on, Save. Stored only on that PC in
   `%LOCALAPPDATA%\PCC Shipping\portal_upload.json`; the queue is in `%LOCALAPPDATA%\PCC Shipping\portal_queue\`.
-- Needs Excel on the shipping PC (already used for the .xlsx files). No new Python packages.
+- New package: **reportlab** (pure Python; `build_exe.bat` installs and bundles it). No Excel needed.

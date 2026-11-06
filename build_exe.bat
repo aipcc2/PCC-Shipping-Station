@@ -20,9 +20,9 @@ python --version
 echo.
 
 REM ── INSTALL PACKAGES ──────────────────────────────────────
-echo Installing pyinstaller, pillow, python-docx, openpyxl, python-barcode...
+echo Installing pyinstaller, pillow, python-docx, openpyxl, python-barcode, reportlab...
 py -3.12 -m pip uninstall -y qrcode >nul 2>&1
-py -3.12 -m pip install pyinstaller pillow python-docx openpyxl python-barcode --quiet --no-warn-script-location
+py -3.12 -m pip install pyinstaller pillow python-docx openpyxl python-barcode reportlab --quiet --no-warn-script-location
 if %errorlevel% neq 0 (
     echo [ERROR] pip install failed.
     pause
@@ -43,7 +43,7 @@ REM have the app running on their machines (which locks the file on the
 REM network share).
 echo Building PCC Shipping_NEW.exe - please wait 60-90 seconds...
 echo.
-py -3.12 -m PyInstaller --onefile --windowed --name "PCC Shipping_NEW" --add-data "logo.png;." --collect-all openpyxl --collect-all barcode --collect-all PIL --collect-all docx "%~dp0shipping_app.py"
+py -3.12 -m PyInstaller --onefile --windowed --name "PCC Shipping_NEW" --add-data "logo.png;." --collect-all openpyxl --collect-all barcode --collect-all PIL --collect-all docx --collect-all reportlab "%~dp0shipping_app.py"
 
 if %errorlevel% neq 0 (
     echo.
