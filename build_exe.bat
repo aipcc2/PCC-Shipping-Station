@@ -25,8 +25,8 @@ py -3.12 --version
 echo.
 
 REM -- INSTALL / UPDATE PACKAGES -------------------------------------------
-echo Installing / updating pyinstaller, pillow, python-docx, openpyxl, python-barcode...
-py -3.12 -m pip install --upgrade pyinstaller pillow python-docx openpyxl python-barcode --quiet --no-warn-script-location
+echo Installing / updating pyinstaller, pillow, python-docx, openpyxl, python-barcode, reportlab...
+py -3.12 -m pip install --upgrade pyinstaller pillow python-docx openpyxl python-barcode reportlab --quiet --no-warn-script-location
 if %errorlevel% neq 0 (
     echo [ERROR] pip install failed.
     popd

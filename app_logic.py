@@ -20,7 +20,13 @@ See PROJECT_NOTES.md for build + deploy steps.
 import tkinter as tk
 from tkinter import ttk, messagebox, filedialog
 import shutil, csv, datetime, json, sys, hashlib, os, re, time, socket
+import queue as _queue
 from pathlib import Path
+import portal_upload   # Customer Portal upload: queue + background sender + upload guard (portal_upload.py)
+try:
+    import pdf_docs    # PDF copies of the CoC / Packing List / Serial list (pdf_docs.py, needs reportlab)
+except ImportError:
+    pdf_docs = None    # the app still runs; the close summary says the PDFs failed
 
 PRODUCTION_ROOTS = {
     "Industrial":  r"\\PCC2\PCC-I-Shares\Production\Industrial",
@@ -35,7 +41,7 @@ HISTORY_DIR    = APP_DATA_DIR + r"\History"
 # If she isn't in the roster, the app falls back to the "select your name"
 # placeholder — change this one line if the primary operator changes.
 DEFAULT_OPERATOR = "Anita Patel"
-APP_VERSION    = "v64"
+APP_VERSION    = "v65"
 
 # ── Offline support (PCC2 down) ──────────────────────────────────────────────
 # All of the above lives on \\PCC2. These local paths let the app survive an
@@ -9821,7 +9827,7 @@ class AdminPanel(tk.Toplevel):
         h=tk.Frame(self,bg=C_DARK); h.pack(fill="x")
         tk.Label(h,text="Admin Panel — Printed Circuits Corp",bg=C_DARK,fg=C_WHITE,font=("Segoe UI",13,"bold")).pack(side="left",padx=20,pady=13)
         tb=tk.Frame(self,bg="#DCDCDC"); tb.pack(fill="x"); self._tb={}
-        for k,l in [("op","  Operators  "),("ad","  Administrators  "),("bx","  Box sizes  ")]:
+        for k,l in [("op","  Operators  "),("ad","  Administrators  "),("bx","  Box sizes  "),("pu","  Portal upload  ")]:
             b=tk.Button(tb,text=l,relief="flat",cursor="hand2",font=("Segoe UI",10,"bold"),pady=10,command=lambda x=k: self._st(x))
             b.pack(side="left"); self._tb[k]=b
         tk.Label(self,text="Changes are saved immediately",bg=C_BG,fg=C_SUBTLE,
@@ -9833,7 +9839,44 @@ class AdminPanel(tk.Toplevel):
         for w in self._bd.winfo_children(): w.destroy()
         if k=="op": self._top()
         elif k=="bx": self._tbx()
+        elif k=="pu": self._tpu()
         else: self._tad()
+    def _tpu(self):
+        """Customer Portal upload settings for THIS PC (saved locally, never on the share)."""
+        f=self._bd; c=portal_upload.load_config()
+        tk.Label(f,text="Send CoC, Packing List and Serial list PDFs to the Customer Portal",bg=C_BG,fg=C_GREEN,font=("Segoe UI",11,"bold")).pack(anchor="w",pady=(0,4))
+        tk.Label(f,text="Industrial and MAG - ITAR jobs. Anything marked export controlled / USML / CUI is never sent.\n"
+                 "Station id and key come from the portal admin (one key per PC). They are saved only on this PC.",
+                 bg=C_BG,fg=C_SUBTLE,font=("Segoe UI",9),justify="left").pack(anchor="w",pady=(0,10))
+        self._pu_en=tk.BooleanVar(value=c["enabled"]); self._pu_id=tk.StringVar(value=c["station_id"])
+        self._pu_key=tk.StringVar(value=c["station_key"]); self._pu_url=tk.StringVar(value=c["url"])
+        tk.Checkbutton(f,text="Turn on portal upload for this PC",variable=self._pu_en,bg=C_BG,font=("Segoe UI",10)).pack(anchor="w",pady=(0,6))
+        g=tk.Frame(f,bg=C_BG); g.pack(fill="x")
+        for r,(l,v,kw) in enumerate([("Station id",self._pu_id,{}),("Station key",self._pu_key,{"show":"●"}),("Portal address",self._pu_url,{})]):
+            tk.Label(g,text=l,bg=C_BG,fg=C_MID,font=("Segoe UI",9),width=14,anchor="e").grid(row=r,column=0,padx=(0,8),pady=4)
+            ttk.Entry(g,textvariable=v,font=("Segoe UI",10),width=52,**kw).grid(row=r,column=1,sticky="w",ipady=3)
+        self._pu_msg=tk.Label(f,text="",bg=C_BG,fg=C_SUBTLE,font=("Segoe UI",9),wraplength=600,justify="left"); self._pu_msg.pack(anchor="w",pady=(10,4))
+        br=tk.Frame(f,bg=C_BG); br.pack(fill="x",pady=4)
+        _btn(br,"Test connection",self._pu_test,bg=C_DARK,fg=C_WHITE).pack(side="left")
+        _btn(br,"Save",self._pu_save,bg=C_GREEN,fg=C_WHITE).pack(side="right")
+    def _pu_values(self):
+        return {"enabled":self._pu_en.get(),"station_id":self._pu_id.get().strip(),
+                "station_key":self._pu_key.get().strip(),"url":self._pu_url.get().strip() or portal_upload.DEFAULT_URL}
+    def _pu_test(self):
+        c=self._pu_values()
+        if not c["station_id"] or len(c["station_key"])<24:
+            self._pu_msg.config(text="Enter the station id and its key (at least 24 characters).",fg=C_RED); return
+        self._pu_msg.config(text="Checking…",fg=C_SUBTLE); self.update()
+        try: ok,msg=portal_upload.ping(c)
+        except Exception as e: ok,msg=False,f"{type(e).__name__}: {e}"
+        self._pu_msg.config(text=("✓ " if ok else "✗ ")+msg,fg=C_GREEN if ok else C_RED)
+    def _pu_save(self):
+        c=self._pu_values()
+        if c["enabled"] and not portal_upload.config_ready(c):
+            self._pu_msg.config(text="Can't turn it on yet: the station id, a key of at least 24 characters and an https address are needed.",fg=C_RED); return
+        try: portal_upload.save_config(c)
+        except Exception as e: self._pu_msg.config(text=f"Couldn't save: {e}",fg=C_RED); return
+        self._pu_msg.config(text="Saved. "+("Portal upload is ON for this PC." if c["enabled"] else "Portal upload is OFF for this PC."),fg=C_GREEN)
     def _top(self):
         f=self._bd; tk.Label(f,text="Operator roster",bg=C_BG,fg=C_GREEN,font=("Segoe UI",11,"bold")).pack(anchor="w",pady=(0,8))
         lf=tk.Frame(f,bg=C_WHITE,highlightbackground=C_BORDER,highlightthickness=1); lf.pack(fill="both",expand=True)
@@ -10024,6 +10067,33 @@ def _hist_event_time(r):
         return time.mktime(time.strptime(str(r.get("ts") or ""), "%Y-%m-%d %H:%M:%S"))
     except Exception:
         return 0.0
+
+class PortalQueueDialog(tk.Toplevel):
+    """This PC's Customer Portal uploads (newest first) with a Retry now button."""
+    LABELS={"pending":"Waiting","done":"Sent","failed":"FAILED","blocked":"Not sent (blocked)"}
+    def __init__(self,parent,uploader):
+        super().__init__(parent); self.title("Portal uploads"); self.geometry("780x420"); self.configure(bg=C_BG)
+        self.transient(parent); self._up=uploader
+        h=tk.Frame(self,bg=C_GREEN); h.pack(fill="x")
+        tk.Label(h,text="Customer Portal uploads on this PC",bg=C_GREEN,fg=C_WHITE,font=("Segoe UI",12,"bold")).pack(side="left",padx=18,pady=10)
+        bar=tk.Frame(self,bg=C_BG); bar.pack(side="bottom",fill="x",padx=18,pady=10)
+        _btn(bar,"Retry now",self._retry,bg=C_TEAL,fg=C_WHITE).pack(side="left")
+        _btn(bar,"Close",self.destroy,bg="#DDD",fg=C_MID).pack(side="right")
+        cols=("when","what","status","note")
+        self._tv=ttk.Treeview(self,columns=cols,show="headings",height=12)
+        for c,w,t in [("when",120,"Queued"),("what",230,"Document"),("status",140,"Status"),("note",270,"Details")]:
+            self._tv.heading(c,text=t); self._tv.column(c,width=w,anchor="w")
+        self._tv.pack(fill="both",expand=True,padx=18,pady=(10,0))
+        self._fill(); _center(self,parent)
+    def _fill(self):
+        self._tv.delete(*self._tv.get_children())
+        jobs=sorted(portal_upload.load_jobs(),key=lambda j: j.get("created_at",0),reverse=True)
+        for j in jobs[:200]:
+            when=datetime.datetime.fromtimestamp(j.get("created_at",0)).strftime("%m/%d %I:%M %p")
+            self._tv.insert("","end",values=(when,portal_upload.describe(j),self.LABELS.get(j.get("status"),j.get("status")),j.get("last_error","")))
+    def _retry(self):
+        if self._up: self._up.retry_now()
+        self.after(1500,self._fill)
 
 def group_shipment_history(records, voided_ids):
     """Collapse raw History events into ONE item per shipment for the viewer
@@ -12617,9 +12687,64 @@ class ShippingApp(tk.Tk):
         self.option_add('*TCombobox*Listbox.selectForeground',C_WHITE)
         self._load_logo(); self._build_ui(); self._refresh_operators()
         self._uc()   # initialize chips, banner dimming AND the footer readout
+        self._start_portal_uploader()   # Customer Portal: background sender + footer status
         # Scanner-first: focus the WO entry immediately so the first barcode
         # scan of the session lands in the field instead of being dropped.
         self.wo_entry.focus_set()
+    # ─── Customer Portal upload (portal_upload.py) ─────────────────────────
+    # A background thread sends queued PDFs and reports through a thread-safe
+    # queue that the UI reads once a second (tkinter is only touched here).
+    def _start_portal_uploader(self):
+        self._portal_events=_queue.Queue()
+        try:
+            self._portal=portal_upload.PortalUploader(lambda kind,job: self._portal_events.put((kind,job)))
+            self._portal.start()
+        except Exception:
+            self._portal=None
+        self._portal_tick()
+    def _portal_tick(self):
+        failures=[]
+        try:
+            while True:
+                kind,job=self._portal_events.get_nowait()
+                if kind in ("failed","blocked"): failures.append(job)
+        except _queue.Empty:
+            pass
+        self._portal_refresh_status()
+        for job in failures:
+            messagebox.showwarning("Portal upload failed",
+                f"{portal_upload.describe(job)} was NOT added to the Customer Portal.\n\n"
+                f"Reason: {job.get('last_error') or 'unknown'}\n\n"
+                f"The shipment itself is fine. Tell the office so they can upload it by hand.")
+        self.after(1000,self._portal_tick)
+    def _portal_refresh_status(self):
+        lbl=getattr(self,"portal_lbl",None)
+        if lbl is None: return
+        try:
+            if not portal_upload.config_ready(portal_upload.load_config()):
+                lbl.config(text="Portal upload: off",fg=C_SUBTLE); return
+            s=portal_upload.summary()
+        except Exception:
+            return
+        parts=[f"✓ {s['sent_today']} sent today"]
+        if s["waiting"]: parts.append(f"{s['waiting']} waiting")
+        if s["failed"]: parts.append(f"⚠ {s['failed']} failed")
+        lbl.config(text="Portal: "+"  ·  ".join(parts),fg=C_RED if s["failed"] else (C_AMBER if s["waiting"] else C_GREEN))
+    def _portal_window(self):
+        PortalQueueDialog(self,getattr(self,"_portal",None))
+    def _write_pdf(self, label, make, log):
+        """Writes the PDF copy of a document next to its .xlsx. Never raises: returns (path, error)."""
+        try:
+            if pdf_docs is None:
+                raise RuntimeError("PDF library (reportlab) is not installed")
+            path = make()
+            log(f"{label} PDF written: {path}")
+            return path, None
+        except Exception as e:
+            import traceback as _tb
+            err = f"{type(e).__name__}: {e}"
+            log(f"{label} PDF FAILED: {err} | {_tb.format_exc()}")
+            return None, err
     def _apply_dpi_scaling(self):
         """With DPI-awareness on, Windows no longer stretches the app, so Tk must
         scale point-based fonts itself. Set tk scaling to the real DPI and grow
@@ -12828,7 +12953,10 @@ class ShippingApp(tk.Tk):
         self.slip_btn.grid(row=0,column=0,sticky="w")
         _HoverTip(self.slip_btn,"Shipping Labels and Slip")
         inner=tk.Frame(f,bg=C_BG); inner.grid(row=0,column=1)  # centered group
-        tk.Frame(f,bg=C_BG,width=1,height=1).grid(row=0,column=2)
+        # Right corner: Customer Portal upload status; click for the list + Retry now.
+        self.portal_lbl=tk.Label(f,text="Portal upload: off",bg=C_BG,fg=C_SUBTLE,font=("Segoe UI",9),cursor="hand2")
+        self.portal_lbl.grid(row=0,column=2,sticky="e")
+        self.portal_lbl.bind("<Button-1>",lambda e: self._portal_window())
         # Two buttons, packed RIGHT to left (Save and Close first): reads Save
         # Draft · Save and Close, as before.
         _btn(inner,"✓   Save and Close Shipment",self._fin,bg=C_GREEN,fg=C_WHITE,font_size=12,padx=32,pady=12).pack(side="right",padx=6)
@@ -13845,6 +13973,7 @@ class ShippingApp(tk.Tk):
 
         # ───── Serials xlsx — always a NEW file (no append, no lock conflicts)
         serials_file=None; serials_err=None; serials_skipped=False; serials_cancelled=False
+        serials_pdf=None; serials_pdf_err=None
         if self.serials:
             prog.step(f"Writing the serials Excel ({len(self.serials)} serials)…")
             fdate = fmt_file_date()
@@ -13857,6 +13986,8 @@ class ShippingApp(tk.Tk):
             if status == "ok":
                 serials_file = value
                 log(f"SERIALS xlsx written: {serials_file}")
+                serials_pdf, serials_pdf_err = self._write_pdf("SERIALS",
+                    lambda: pdf_docs.write_serials_pdf(serials_file, eng_safe, wo, self.serials, fmt_date(), fmt_time(), op), log)
             elif status == "skip":
                 serials_skipped = True
             elif status == "cancel":
@@ -13891,6 +14022,7 @@ class ShippingApp(tk.Tk):
 
         # ───── COC xlsx — wrap with retry-on-lock + skip handling
         cf=None; coc_err=None; coc_cancelled=False; coc_skipped=False
+        coc_pdf=None; coc_pdf_err=None
         if self.coc_data:
             prog.step("Writing the Certificate of Compliance…")
             try:
@@ -13906,6 +14038,8 @@ class ShippingApp(tk.Tk):
                     if status == "ok":
                         cf = value
                         log(f"COC written: {cf}")
+                        coc_pdf, coc_pdf_err = self._write_pdf("COC",
+                            lambda: pdf_docs.write_coc_pdf(cf, self.coc_data, self.serials), log)
                     elif status == "skip":
                         coc_skipped = True
                     elif status == "cancel":
@@ -13924,6 +14058,7 @@ class ShippingApp(tk.Tk):
 
         # ───── Packing List xlsx — always a NEW file
         sf=None; pl_err=None; pl_cancelled=False; pl_skipped=False
+        pl_pdf=None; pl_pdf_err=None
         if self.packing_data:
             prog.step("Writing the Packing List…")
             try:
@@ -13939,6 +14074,8 @@ class ShippingApp(tk.Tk):
                     if status == "ok":
                         sf = value
                         log(f"PACKING LIST written: {sf}")
+                        pl_pdf, pl_pdf_err = self._write_pdf("PACKING LIST",
+                            lambda: pdf_docs.write_packing_list_pdf(sf, self.packing_data, self.serials, logo_path=str(LOGO_PATH)), log)
                     elif status == "skip":
                         pl_skipped = True
                     elif status == "cancel":
@@ -13954,6 +14091,21 @@ class ShippingApp(tk.Tk):
                 pl_err=f"{type(e).__name__}: {e}"
                 log(f"PACKING LIST FAILED: {pl_err}\n{traceback.format_exc()}")
 
+        # ───── Customer Portal: queue the CoC / Packing List / Serial list PDFs.
+        # Industrial and MAG - ITAR jobs (Sahil 2026-11-07). enqueue_shipment() refuses
+        # files outside the division's share folder and anything marked export controlled.
+        # Only writes a small job file; a background thread uploads. Never blocks the close.
+        if self._offline_shipment:
+            portal_status, portal_msg = "offline", "Not sent (offline shipment — file it on the share first)."
+        else:
+            prog.step("Queuing the Customer Portal upload…")
+            portal_status, portal_msg = portal_upload.enqueue_shipment(
+                div, self.wo_folder, wo, eng_safe,
+                coc_pdf=coc_pdf, coc_data=self.coc_data,
+                packing_pdf=pl_pdf, packing_data=self.packing_data,
+                serials=self.serials, serials_pdf=serials_pdf)
+        log(f"PORTAL {portal_status}: {portal_msg}")
+
         # ───── Build summary, surfacing real errors prominently
         n_serials=len(self.serials)
         errors=[]
@@ -13961,6 +14113,12 @@ class ShippingApp(tk.Tk):
         if coc_err:     errors.append(f"  COC: {coc_err}")
         if pl_err:      errors.append(f"  Packing List: {pl_err}")
         if wp_err:      errors.append(f"  Serials Word: {wp_err}")
+        if serials_pdf_err: errors.append(f"  Serials PDF: {serials_pdf_err}")
+        if coc_pdf_err:     errors.append(f"  COC PDF: {coc_pdf_err}")
+        if pl_pdf_err:      errors.append(f"  Packing List PDF: {pl_pdf_err}")
+        def pdf_note(xlsx, pdf):
+            if not xlsx: return ""
+            return "  + PDF ✓" if pdf else "  + PDF FAILED"
 
         # Build status label per file. Possible states:
         # ✓ written / — n/a (no data) / — skipped (user) / FAILED (unhandled error)
@@ -14001,6 +14159,9 @@ class ShippingApp(tk.Tk):
                         "serials_docx": str(wp) if wp else None,
                         "coc_xlsx": str(cf) if cf else None,
                         "packing_xlsx": str(sf) if sf else None,
+                        "serials_pdf": str(serials_pdf) if serials_pdf else None,
+                        "coc_pdf": str(coc_pdf) if coc_pdf else None,
+                        "packing_pdf": str(pl_pdf) if pl_pdf else None,
                         "slip_html": slip_out.get("slip_html") or None,
                         "labels_html": slip_out.get("labels_html") or None,
                         "pack_html": slip_out.get("pack_html") or None},
@@ -14011,6 +14172,7 @@ class ShippingApp(tk.Tk):
                 "word": "ok" if wp else (("failed: " + wp_err) if wp_err else "n/a"),
             },
             "critical_ok": critical_ok, "errors": list(errors),
+            "portal": {"status": portal_status, "detail": portal_msg},
             "resumed_from_draft": self.resumed_from_draft,
             "draft_id": self.current_draft_id or "",
             "started_at": self._started_at or "", "started_by": self._started_by or "",
@@ -14064,10 +14226,11 @@ class ShippingApp(tk.Tk):
         if photos_failed:
             msg_lines.append(f"  • {len(photos_failed)} photo(s) FAILED to move")
         msg_lines += [
-            f"Serials xlsx:    {status_label(bool(self.serials), serials_file, False, serials_skipped)}",
+            f"Serials xlsx:    {status_label(bool(self.serials), serials_file, False, serials_skipped)}{pdf_note(serials_file, serials_pdf)}",
             f"Serials Word:    {'✓' if wp else '—'}",
-            f"COC:             {status_label(bool(self.coc_data), cf, coc_cancelled, coc_skipped)}",
-            f"Packing List:    {status_label(bool(self.packing_data), sf, pl_cancelled, pl_skipped)}",
+            f"COC:             {status_label(bool(self.coc_data), cf, coc_cancelled, coc_skipped)}{pdf_note(cf, coc_pdf)}",
+            f"Packing List:    {status_label(bool(self.packing_data), sf, pl_cancelled, pl_skipped)}{pdf_note(sf, pl_pdf)}",
+            f"Customer Portal: {portal_msg}",
         ]
         if report_update:
             _rs, _rd = report_update

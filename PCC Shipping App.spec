@@ -40,13 +40,17 @@ hiddenimports = [
     'openpyxl.drawing.xdr',
     'barcode', 'barcode.writer',
     'docx', 'docx.shared',
+    # Customer Portal upload + PDF copies (portal_upload.py, pdf_docs.py sit next to app_logic.py
+    # and are compiled INTO the exe like everything else — still one file at runtime).
+    'portal_upload', 'pdf_docs',
+    'reportlab', 'reportlab.pdfgen.canvas', 'reportlab.graphics.barcode.code128',
     # Monday.com WO auto-lookup networking (stdlib).
     'ssl', '_ssl', 'urllib', 'urllib.request', 'urllib.parse', 'urllib.error',
     'http', 'http.client', 'json', 'threading', 'queue', 'socket', 'subprocess',
 ]
 
 # Pull in the FULL third-party packages (code + data + submodules).
-for _pkg in ('openpyxl', 'barcode', 'PIL', 'docx'):
+for _pkg in ('openpyxl', 'barcode', 'PIL', 'docx', 'reportlab'):
     _d, _b, _h = collect_all(_pkg)
     datas += _d
     binaries += _b
