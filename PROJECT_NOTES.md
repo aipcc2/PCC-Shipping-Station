@@ -143,6 +143,18 @@ After PCC2 returns, copy each Outbox shipment's four subfolders into the real WO
 
 ## 8. Change log
 
+- **2026-11-07 (v65 — PDF COPIES + CUSTOMER PORTAL UPLOAD — branch feature/portal-upload, NOT merged / NOT built)**
+  Requested by Sahil (approved 2026-11-06). Save and Close now writes a PDF next to each .xlsx (CoC, Packing
+  List, Serial list) drawn by the new `pdf_docs.py` (reportlab; the shipping PCs have no Excel), then queues
+  them for the PCC Customer Portal via the new `portal_upload.py` (background thread, retries, footer status,
+  Portal uploads window, pop-up on a permanent failure, Admin → Portal upload tab; OFF until a station key is
+  entered on that PC). HARD RULE: MAG - ITAR jobs are never sent (division + path + text guard, three times;
+  offline Outbox shipments are not sent either). `app_logic.py` changes are hooks only (imports, the close,
+  footer, Admin tab, PortalQueueDialog); history close records gain `outputs.*_pdf` and `portal`.
+  Spec + build_exe.bat add reportlab. Re-emit paperwork still rebuilds the .xlsx only (no PDF) — follow-up.
+  **Tests:** new tests/test_pdf_docs.py + tests/test_portal_upload.py (25, green); the seven existing suites
+  give identical results before/after. Test exe build OK (reportlab + both modules inside).
+
 - **2026-10-28 (v64 — HISTORY: ONE ROW PER SHIPMENT + ENG# SEARCH; RECEIVING WINDOW MAXIMIZES; exe rebuilt 10/28)**
   Parts (1) and (2) of the 2026-10-24 plan, built on the shipping PC (entry written 2026-11-07 from the code;
   live exe `\\PCC2\PCC-I-Shares\Production\PCC Shipping App.exe` = `Scripts\dist`, 10/28 3:07 PM).
