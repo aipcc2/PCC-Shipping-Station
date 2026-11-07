@@ -143,6 +143,25 @@ After PCC2 returns, copy each Outbox shipment's four subfolders into the real WO
 
 ## 8. Change log
 
+- **2026-10-28 (v64 — HISTORY: ONE ROW PER SHIPMENT + ENG# SEARCH; RECEIVING WINDOW MAXIMIZES; exe rebuilt 10/28)**
+  Parts (1) and (2) of the 2026-10-24 plan, built on the shipping PC (entry written 2026-11-07 from the code;
+  live exe `\\PCC2\PCC-I-Shares\Production\PCC Shipping App.exe` = `Scripts\dist`, 10/28 3:07 PM).
+  - **History** lists ONE row per shipment: `group_shipment_history(records, voided_ids)` groups the draft_save /
+    close / delete events that share a `draft_id`; events without a draft_id, and every receive / backfill /
+    void, stay as their own rows so nothing disappears. Columns: Status (Closed / Draft / Deleted / Voided /
+    Received / Imported), WO, Eng #, P/N, Customer, Started, Saved, Closed, Serials. New **"Eng# contains"**
+    filter. Double-click a shipment -> new `ShipmentDetail` window with the full save timeline (double-click an
+    event there for the old `HistoryDetail` card). CSV export writes every event of the rows shown.
+  - **Started by / when** is now recorded: `ShippingApp._started_at/_started_by` are stamped at WO load, saved in
+    the draft (`save_shipment_draft(..., started_at, started_by)`), restored when a draft is resumed, and written
+    on the draft_save / close History events. Older shipments fall back to their first save.
+  - **Receiving window** is no longer `transient` (Dhruvil 2026-10-28 could not maximize it): normal
+    maximize/minimize buttons and its own taskbar entry.
+  - `write_received_xlsx`: when `_home_unknown` is set the error now says the job's folders can't be checked from
+    this PC (Rebuild on a PC that can open them) instead of "no work-order folder known".
+  Still open: Receiving placement with 2+ -970 WOs + the 3 failing test_receiving.py checks; the 3694
+  template-folder fix. A stale 10/5 exe still sits at `...\Industrial\Shipping App\PCC Shipping App.exe`.
+
 - **2026-10-27 (SHIPPING REPORT AUTO-UPDATE — runs inside the close, result shown + recorded; exe rebuilt 10/27)**
   Part (3) of the 2026-10-24 plan, built on the shipping PC (entry written 2026-11-06 from the code). Before: the
   update ran on a SILENT daemon thread — a report open in Excel, or the app moving on / closing right after the close,

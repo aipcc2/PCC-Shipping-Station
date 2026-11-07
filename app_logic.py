@@ -35,7 +35,7 @@ HISTORY_DIR    = APP_DATA_DIR + r"\History"
 # If she isn't in the roster, the app falls back to the "select your name"
 # placeholder — change this one line if the primary operator changes.
 DEFAULT_OPERATOR = "Anita Patel"
-APP_VERSION    = "v63"
+APP_VERSION    = "v64"
 
 # ── Offline support (PCC2 down) ──────────────────────────────────────────────
 # All of the above lives on \\PCC2. These local paths let the app survive an
@@ -4270,6 +4270,16 @@ def write_received_xlsx(state):
         raise RuntimeError("history could not be read completely — file left unchanged")
     wo_path = state.get("wo_path")
     if not wo_path:
+        # Distinguish 'could not CHECK the home from this PC' (the -900/-970 job
+        # folders are unreadable here) from a job that genuinely has no work-order
+        # folder yet. Telling the operator "no work-order folder known" when the
+        # folder merely can't be reached is misleading — point them at a PC that can
+        # open it instead (review: the unlistable-sibling refusal).
+        if state.get("_home_unknown"):
+            raise RuntimeError(
+                "this job's work-order folders can't be checked from this PC. "
+                "Nothing was written — the boards ARE saved to history. Run 🔁 Rebuild "
+                "on a PC that can open this job's folders.")
         raise RuntimeError("no work-order folder known for this job yet")
     # Resolve to a REAL testing WO folder — a rev change may have renamed/moved
     # the recorded one, and mkdir(parents=True) on a stale string would build a
@@ -8216,7 +8226,8 @@ def _draft_path(wo_folder, draft_id=None):
     return Path(wo_folder) / DRAFT_FILENAME
 
 def save_shipment_draft(wo_folder, pending_photos, serials, coc_data, packing_data,
-                        operator="", notes="", draft_id=None, slip_data=None):
+                        operator="", notes="", draft_id=None, slip_data=None,
+                        started_at="", started_by=""):
     """
     Persist current shipment state to this shipment's own draft file (see
     _draft_path). Photo paths are stored, NOT moved — actual file moves happen
@@ -8234,6 +8245,10 @@ def save_shipment_draft(wo_folder, pending_photos, serials, coc_data, packing_da
             "draft_id": str(draft_id or ""),
             "saved_at": datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
             "saved_by": operator or "",
+            # When THIS shipment was first started (WO load), so a draft resumed in a
+            # later app session keeps its real start for History grouping.
+            "started_at": started_at or "",
+            "started_by": started_by or "",
             "pending_photos": valid_photos,
             "serials": list(serials or []),
             "coc_data": coc_data or None,
@@ -9999,6 +10014,102 @@ class AdminPanel(tk.Toplevel):
 # the selected month folders, filters in memory, and never writes anything
 # except a user-requested CSV export.
 
+def _hist_event_time(r):
+    """Event time as an epoch float (ts_epoch, else parse ts). 0.0 if unknown."""
+    try:
+        return float(r.get("ts_epoch"))
+    except Exception:
+        pass
+    try:
+        return time.mktime(time.strptime(str(r.get("ts") or ""), "%Y-%m-%d %H:%M:%S"))
+    except Exception:
+        return 0.0
+
+def group_shipment_history(records, voided_ids):
+    """Collapse raw History events into ONE item per shipment for the viewer
+    (Dhruvil 2026-10-24: 'one row per shipment, not per save'). A shipment is the
+    draft_save + close + delete events that share a draft_id; events with no
+    draft_id, and every receive / backfill_shipped / void, each stand alone so
+    nothing disappears from History. Returns a list of item dicts with a common
+    flat display shape (caller sorts):
+      kind='shipment' -> draft_id, status, wo/eng/pn/customer/division/operator,
+        started_by/at, saved_by/at (last save), closed_by/at/station, serial_count,
+        ts (newest event epoch), timeline (events oldest->newest), rep (the close,
+        else the newest event).
+      kind='event'    -> rec (raw), same flat keys."""
+    groups = {}
+    standalone = []
+    for r in records:
+        if not isinstance(r, dict):
+            continue
+        et = r.get("event_type") or ""
+        did = str(r.get("draft_id") or "")
+        if did and et in ("draft_save", "close", "delete"):
+            groups.setdefault(did, []).append(r)
+        else:
+            standalone.append(r)
+    items = []
+    for did, evs in groups.items():
+        evs = sorted(evs, key=_hist_event_time)
+        closes = [e for e in evs if e.get("event_type") == "close"]
+        dels = [e for e in evs if e.get("event_type") == "delete"]
+        saves = [e for e in evs if e.get("event_type") == "draft_save"]
+        close = closes[-1] if closes else None
+        latest = evs[-1]
+        if close and str(close.get("event_id") or "") in voided_ids:
+            status = "🚫 Voided"
+        elif dels and not closes:
+            status = "✕ Deleted"
+        elif close:
+            status = "✓ Closed"
+        else:
+            status = "✎ Draft"
+        started_by = started_at = ""
+        for e in evs:                       # an explicit WO-load stamp wins
+            if e.get("started_by") or e.get("started_at"):
+                started_by = str(e.get("started_by") or ""); started_at = str(e.get("started_at") or ""); break
+        if not started_at:                  # fall back to the first save / its resumed-from
+            first = saves[0] if saves else evs[0]
+            rd = first.get("resumed_from_draft") or {}
+            started_by = started_by or str(first.get("operator") or rd.get("saved_by") or "")
+            started_at = str(rd.get("saved_at") or first.get("ts") or "")
+        last_save = saves[-1] if saves else None
+        rep = close or latest
+        items.append({
+            "kind": "shipment", "draft_id": did, "status": status,
+            "wo": str(rep.get("wo") or ""), "eng": str(rep.get("eng") or ""),
+            "pn": str(rep.get("pn") or ""), "customer": str(rep.get("customer") or ""),
+            "division": str(rep.get("division") or ""), "operator": str(rep.get("operator") or ""),
+            "started_by": started_by, "started_at": started_at,
+            "saved_by": str((last_save or {}).get("operator") or ""),
+            "saved_at": str((last_save or {}).get("ts") or ""),
+            "closed_by": str((close or {}).get("operator") or ""),
+            "closed_at": str((close or {}).get("ts") or ""),
+            "station": str((close or {}).get("station") or ""),
+            "serial_count": (rep.get("serial_count") if rep.get("serial_count") is not None
+                             else len(rep.get("serials") or [])),
+            "ts": _hist_event_time(latest), "timeline": evs, "rep": rep,
+        })
+    _EVL = {"receive": "📦 Received", "backfill_shipped": "⏪ Imported", "void": "🚫 Void",
+            "draft_save": "✎ Draft", "close": "✓ Closed", "delete": "✕ Deleted"}
+    for r in standalone:
+        et = r.get("event_type") or ""
+        posted = et in ("receive", "backfill_shipped")
+        items.append({
+            "kind": "event", "rec": r, "status": _EVL.get(et, et or "?"),
+            "wo": str(r.get("wo") or ""), "eng": str(r.get("eng") or ""), "pn": str(r.get("pn") or ""),
+            "customer": str(r.get("customer") or ""), "division": str(r.get("division") or ""),
+            "operator": str(r.get("operator") or ""),
+            "started_by": "", "started_at": "", "saved_by": "", "saved_at": "",
+            "closed_by": str(r.get("operator") or "") if posted else "",
+            "closed_at": str(r.get("ts") or "") if (posted or et == "void") else "",
+            "station": str(r.get("station") or ""),
+            "serial_count": (r.get("serial_count") if r.get("serial_count") is not None
+                             else len(r.get("serials") or [])),
+            "ts": _hist_event_time(r), "timeline": [r], "rep": r,
+        })
+    return items
+
 class HistoryDetail(tk.Toplevel):
     """Read-only detail card for a single shipment history record."""
     LABELS={"close":"Closed","draft_save":"Draft","delete":"Deleted",
@@ -10309,9 +10420,65 @@ class HistoryDetail(tk.Toplevel):
         else:
             messagebox.showerror("Re-emit paperwork",msg,parent=self)
 
+class ShipmentDetail(tk.Toplevel):
+    """One shipment's full save TIMELINE (Dhruvil 2026-10-24): the draft-saves,
+    close and delete that share a draft_id, oldest->newest. Double-click a row to
+    open that single event's full card (HistoryDetail)."""
+    def __init__(self, parent, item, voided=None):
+        super().__init__(parent); self._item=item; self._voided=voided or {}
+        self.title(f"Shipment — WO {item.get('wo','?')}")
+        self.geometry("800x600"); self.transient(parent); self.configure(bg=C_BG)
+        self.bind("<Escape>", lambda e: self.destroy())
+        self._build(); _center(self, parent)
+    def _openf(self, p):
+        try:
+            if p and Path(str(p)).exists(): os.startfile(str(p))
+            else: messagebox.showwarning("Not found", f"Path doesn't exist:\n{p}", parent=self)
+        except Exception as e:
+            messagebox.showerror("Open failed", str(e), parent=self)
+    def _build(self):
+        it=self._item; rep=it.get("rep") or {}
+        hc={"✓ Closed":C_GREEN,"✎ Draft":C_TEAL,"✕ Deleted":C_RED,"🚫 Voided":C_SUBTLE}.get(it.get("status"),C_GREEN)
+        h=tk.Frame(self,bg=hc); h.pack(fill="x")
+        tk.Label(h,text=f"{it.get('status','')} — WO {it.get('wo','?')}",bg=hc,fg=C_WHITE,font=("Segoe UI",13,"bold")).pack(side="left",padx=20,pady=12)
+        bb=tk.Frame(self,bg=C_BG); bb.pack(side="bottom",fill="x",padx=16,pady=10)
+        _btn(bb,"Close",self.destroy,bg="#DDD",fg=C_MID).pack(side="right")
+        if rep.get("wo_folder"):
+            _btn(bb,"Open WO Folder",lambda:self._openf(rep.get("wo_folder")),bg=C_GREEN,fg=C_WHITE).pack(side="left",padx=(0,8))
+        info=tk.Frame(self,bg=C_BG); info.pack(fill="x",padx=16,pady=(10,0))
+        for lbl,val in [("Eng #",it.get("eng")),("P/N",it.get("pn")),("Customer",it.get("customer")),
+                        ("Division",it.get("division")),
+                        ("Started",HistoryViewer._byline(it.get("started_by"),it.get("started_at"))),
+                        ("Last saved",HistoryViewer._byline(it.get("saved_by"),it.get("saved_at"))),
+                        ("Closed",HistoryViewer._byline(it.get("closed_by"),it.get("closed_at"),it.get("station","")))]:
+            row=tk.Frame(info,bg=C_BG); row.pack(fill="x",pady=1)
+            tk.Label(row,text=str(lbl)+":",bg=C_BG,fg=C_SUBTLE,font=("Segoe UI",9),width=11,anchor="w").pack(side="left")
+            tk.Label(row,text=str(val or "—"),bg=C_BG,fg=C_DARK,font=("Segoe UI",10),anchor="w").pack(side="left")
+        tk.Label(self,text="Save timeline — double-click a row for its full details:",bg=C_BG,fg=C_SUBTLE,font=("Segoe UI",9,"bold")).pack(anchor="w",padx=16,pady=(12,2))
+        tf=tk.Frame(self,bg=C_WHITE,highlightbackground=C_BORDER,highlightthickness=1); tf.pack(fill="both",expand=True,padx=16,pady=(0,4))
+        sb=ttk.Scrollbar(tf); sb.pack(side="right",fill="y")
+        tv=ttk.Treeview(tf,columns=("time","event","by","station","serials"),show="headings",yscrollcommand=sb.set); sb.config(command=tv.yview)
+        for c,t,w,a in [("time","Date/Time",150,"w"),("event","Event",120,"w"),("by","By",120,"w"),("station","Station",120,"w"),("serials","S/N",52,"center")]:
+            tv.heading(c,text=t); tv.column(c,width=w,anchor=a)
+        tv.pack(side="left",fill="both",expand=True)
+        self._tl_tv=tv; self._tl_recs={}
+        for e in (it.get("timeline") or []):
+            et=e.get("event_type") or ""; lab=HistoryViewer.EVENT_LABEL.get(et,et)
+            if str(e.get("event_id") or "") in self._voided: lab+=" (VOIDED)"
+            sc=e.get("serial_count")
+            if sc is None: sc=len(e.get("serials") or [])
+            iid=tv.insert("","end",values=(str(e.get("ts") or ""),lab,str(e.get("operator") or ""),str(e.get("station") or ""),sc))
+            self._tl_recs[iid]=e
+        tv.bind("<Double-1>",self._open_event)
+        tv.bind("<Return>",lambda ev:self._open_event(None))
+    def _open_event(self,event=None):
+        iid=self._tl_tv.identify_row(event.y) if event else (self._tl_tv.selection() or [None])[0]
+        e=self._tl_recs.get(iid)
+        if e: HistoryDetail(self,e,voided=self._voided.get(str(e.get("event_id") or "")))
+
 class HistoryViewer(tk.Toplevel):
     """Non-modal browser for shipment history records (close / draft / delete)."""
-    COLS=("dt","type","wo","div","operator","customer","pn","eng","serials","photos","status")
+    COLS=("status","wo","eng","pn","customer","started","saved","closed","serials")
     # Glyph prefixes encode the event type by SHAPE as well as color, so rows stay
     # distinguishable for colorblind users, in print-outs and in the CSV export.
     EVENT_LABEL={"close":"✓ Closed","draft_save":"✎ Draft","delete":"✕ Deleted",
@@ -10319,10 +10486,13 @@ class HistoryViewer(tk.Toplevel):
                  "void":"🚫 Void"}
     def __init__(self,parent):
         super().__init__(parent); self.title("Shipment History"); self.geometry("1100x680")
-        self.transient(parent); self.configure(bg=C_BG); self.minsize(900,520)
+        # NOT transient: a transient Toplevel loses its maximize/minimize buttons on
+        # Windows (Dhruvil 2026-10-28 couldn't maximize it). This is a non-modal
+        # browser, so it gets a normal resizable/maximizable window + a taskbar entry.
+        self.configure(bg=C_BG); self.minsize(900,520)
         self._all=[]; self._shown=[]; self._records={}; self._skipped=0
         self._voided={}   # target_event_id -> the void marker record
-        self._sort_col="dt"; self._sort_desc=True
+        self._sort_col="ts"; self._sort_desc=True   # ts = newest shipment activity
         self._months=self._list_months()
         self._build(); _center(self,parent)
         self.bind("<Escape>",lambda e: self.destroy())
@@ -10354,7 +10524,7 @@ class HistoryViewer(tk.Toplevel):
             tk.Label(f,text=label,bg=C_WHITE,fg=C_SUBTLE,font=("Segoe UI",8)).pack(anchor="w")
             v=tk.StringVar(); e=ttk.Entry(f,textvariable=v,font=("Segoe UI",10),width=width); e.pack(ipady=2)
             e.bind("<Return>",lambda ev: self._search()); return v
-        self._f_wo=fld("WO contains",13); self._f_sn=fld("Serial # contains",16); self._f_cust=fld("Customer contains",16)
+        self._f_wo=fld("WO contains",11); self._f_eng=fld("Eng# contains",11); self._f_sn=fld("Serial # contains",15); self._f_cust=fld("Customer contains",15)
         def cbo(label,values,width):
             f=tk.Frame(r1,bg=C_WHITE); f.pack(side="left",padx=(0,12))
             tk.Label(f,text=label,bg=C_WHITE,fg=C_SUBTLE,font=("Segoe UI",8)).pack(anchor="w")
@@ -10383,7 +10553,7 @@ class HistoryViewer(tk.Toplevel):
         self._tv=ttk.Treeview(tf,columns=self.COLS,show="headings",yscrollcommand=sb.set)
         sb.config(command=self._tv.yview)
         self._col_titles={}
-        for c,t,wd,anc,stretch in [("dt","Date/Time",128,"w",False),("type","Type",84,"w",False),("wo","WO",85,"w",False),("div","Div",80,"w",False),("operator","Operator",95,"w",False),("customer","Customer",130,"w",True),("pn","P/N",110,"w",True),("eng","Eng",78,"w",False),("serials","Serials",52,"center",False),("photos","Photos",52,"center",False),("status","Status",62,"w",False)]:
+        for c,t,wd,anc,stretch in [("status","Status",92,"w",False),("wo","WO",82,"w",False),("eng","Eng#",70,"w",False),("pn","P/N",120,"w",True),("customer","Customer",120,"w",True),("started","Started (by · when)",150,"w",False),("saved","Last saved (by · when)",150,"w",False),("closed","Closed (by · when · PC)",175,"w",False),("serials","S/N",46,"center",False)]:
             self._col_titles[c]=t
             self._tv.heading(c,text=t,command=lambda x=c: self._sort(x))
             self._tv.column(c,width=wd,anchor=anc,stretch=stretch)
@@ -10460,80 +10630,92 @@ class HistoryViewer(tk.Toplevel):
         self._apply_filters()
         if not self._months: self._status.config(text="No history yet")
     def _apply_filters(self):
-        """Filter loaded records by the current filter-bar values and repopulate."""
-        woq=self._f_wo.get().strip().lower(); snq=self._f_sn.get().strip().lower()
-        cuq=self._f_cust.get().strip().lower()
+        """Group loaded events into ONE item per shipment (Dhruvil 2026-10-24),
+        filter by the filter-bar values, and repopulate."""
+        woq=self._f_wo.get().strip().lower(); enq=self._f_eng.get().strip().lower()
+        snq=self._f_sn.get().strip().lower(); cuq=self._f_cust.get().strip().lower()
         opq=self._f_op.get(); dvq=self._f_div.get()
-        types=set()
-        if self._t_closed.get(): types.add("close")
-        if self._t_draft.get(): types.add("draft_save")
-        if self._t_del.get(): types.update(("delete","void"))
-        if self._t_recv.get(): types.update(("receive","backfill_shipped"))
+        show_closed=self._t_closed.get(); show_draft=self._t_draft.get()
+        show_del=self._t_del.get(); show_recv=self._t_recv.get()
+        items=group_shipment_history(self._all,{str(k) for k in self._voided})
         shown=[]
-        for r in self._all:
-            if not isinstance(r,dict): continue
-            if (r.get("event_type") or "") not in types: continue
-            if woq and woq not in str(r.get("wo") or "").lower(): continue
-            if cuq and cuq not in str(r.get("customer") or "").lower(): continue
-            if snq and not any(snq in str(s).lower() for s in (r.get("serials") or [])): continue
-            if opq not in ("","All") and str(r.get("operator") or "")!=opq: continue
-            if dvq not in ("","All") and str(r.get("division") or "")!=dvq: continue
-            shown.append(r)
+        for it in items:
+            status=it.get("status","")
+            if status=="✓ Closed" and not show_closed: continue
+            if status=="✎ Draft" and not show_draft: continue
+            if status in ("✕ Deleted","🚫 Voided","🚫 Void") and not show_del: continue
+            if status in ("📦 Received","⏪ Imported") and not show_recv: continue
+            if woq and woq not in it.get("wo","").lower(): continue
+            if enq and enq not in it.get("eng","").lower(): continue
+            if cuq and cuq not in it.get("customer","").lower(): continue
+            if opq not in ("","All") and opq not in (it.get("operator",""),it.get("closed_by",""),it.get("saved_by",""),it.get("started_by","")): continue
+            if dvq not in ("","All") and it.get("division","")!=dvq: continue
+            if snq and not any(snq in str(s).lower() for e in it.get("timeline",[]) for s in (e.get("serials") or [])): continue
+            shown.append(it)
         self._shown=shown
-        self._shown.sort(key=lambda r: self._sort_key(r,self._sort_col),reverse=self._sort_desc)
+        self._shown.sort(key=lambda it: self._sort_key(it,self._sort_col),reverse=self._sort_desc)
         self._populate()
     def _rec_time(self,r):
         """Best-effort event time as epoch float (ts_epoch, else parse ts)."""
-        try: return float(r.get("ts_epoch"))
-        except Exception: pass
-        try: return time.mktime(time.strptime(str(r.get("ts") or ""),"%Y-%m-%d %H:%M:%S"))
-        except Exception: return 0.0
-    def _row_vals(self,r):
-        """Build the tuple of display values for one record."""
-        et=r.get("event_type") or ""
-        st=("OK" if r.get("critical_ok") else "ERRORS") if et=="close" else "—"
-        sc=r.get("serial_count")
-        if sc is None: sc=len(r.get("serials") or [])
-        ph=(r.get("photos") or {}).get("moved_count",0)
-        if et=="delete":
-            # a deletion has no shipment contents — show "—", not a fake-precise 0
-            if not r.get("serials"): sc="—"
-            if not (r.get("photos") or {}).get("moved"): ph="—"
-        return (str(r.get("ts") or ""),self.EVENT_LABEL.get(et,et or "?"),str(r.get("wo") or ""),str(r.get("division") or ""),str(r.get("operator") or ""),str(r.get("customer") or ""),str(r.get("pn") or ""),str(r.get("eng") or ""),sc,ph,st)
-    def _sort_key(self,r,col):
-        """Sort key for one record in the given column."""
-        if col=="dt": return self._rec_time(r)
-        v=self._row_vals(r)[self.COLS.index(col)]
-        if col in ("serials","photos"):
+        return _hist_event_time(r)
+    @staticmethod
+    def _byline(by,when,extra=""):
+        when=str(when or "")[:16]
+        if not by and not when and not extra: return "—"
+        s=str(by or "")
+        if when: s=(s+"  ·  "+when) if s else when
+        if extra: s=(s+"  ·  "+extra) if s else extra
+        return s
+    def _row_vals(self,it):
+        """Display tuple for one grouped shipment / standalone event."""
+        return (it.get("status",""),it.get("wo",""),it.get("eng",""),it.get("pn",""),
+                it.get("customer",""),
+                self._byline(it.get("started_by"),it.get("started_at")),
+                self._byline(it.get("saved_by"),it.get("saved_at")),
+                self._byline(it.get("closed_by"),it.get("closed_at"),it.get("station","")),
+                it.get("serial_count",""))
+    def _sort_key(self,it,col):
+        """Sort key for one item (default 'ts' = newest shipment activity)."""
+        if col=="ts": return it.get("ts",0.0)
+        if col=="started": return str(it.get("started_at") or "")
+        if col=="saved": return str(it.get("saved_at") or "")
+        if col=="closed": return str(it.get("closed_at") or "")
+        try: v=self._row_vals(it)[self.COLS.index(col)]
+        except Exception: return it.get("ts",0.0)
+        if col=="serials":
             try: return float(v)
             except Exception: return -1.0
         return str(v).lower()
     def _sort(self,col):
         """Toggle asc/desc sort on a column header click."""
         if col==self._sort_col: self._sort_desc=not self._sort_desc
-        else: self._sort_col=col; self._sort_desc=(col=="dt")
-        self._shown.sort(key=lambda r: self._sort_key(r,col),reverse=self._sort_desc)
+        else: self._sort_col=col; self._sort_desc=(col in ("started","saved","closed"))
+        self._shown.sort(key=lambda it: self._sort_key(it,col),reverse=self._sort_desc)
         self._populate()
     def _populate(self):
-        """Refill the tree from self._shown and update the footer count."""
+        """Refill the tree from self._shown (one row per shipment) + footer count."""
         for iid in self._tv.get_children(): self._tv.delete(iid)
         self._records={}
-        for r in self._shown:
-            vals=list(self._row_vals(r)); tag=r.get("event_type") or ""
-            if str(r.get("event_id") or "") in self._voided:
-                vals[1]=str(vals[1])+" (VOIDED)"; tag="voided"
-            iid=self._tv.insert("","end",values=vals,tags=(tag,))
-            self._records[iid]=r
-        # heading arrows show which column is sorted, and which way
+        _tag={"✓ Closed":"close","✎ Draft":"draft_save","✕ Deleted":"delete",
+              "🚫 Voided":"voided","🚫 Void":"void","📦 Received":"receive","⏪ Imported":"backfill_shipped"}
+        for it in self._shown:
+            iid=self._tv.insert("","end",values=self._row_vals(it),tags=(_tag.get(it.get("status"),""),))
+            self._records[iid]=it
         for c,t in self._col_titles.items():
             self._tv.heading(c,text=t+("  ▼" if self._sort_desc else "  ▲") if c==self._sort_col else t)
-        self._status.config(text=f"{len(self._shown)} records shown ({self._skipped} files skipped)  —  double-click a row for details")
+        n_ship=sum(1 for it in self._shown if it.get("kind")=="shipment")
+        self._status.config(text=f"{len(self._shown)} rows · {n_ship} shipment(s) ({self._skipped} files skipped)  —  double-click for the full timeline")
     def _detail(self,event=None):
-        """Open the detail card for the double-clicked row."""
+        """Open the full timeline (a grouped shipment) or the single-event card."""
         iid=self._tv.identify_row(event.y) if event else (self._tv.selection() or [None])[0]
         if not iid: return
-        rec=self._records.get(iid)
-        if rec: HistoryDetail(self,rec,voided=self._voided.get(str(rec.get("event_id") or "")))
+        it=self._records.get(iid)
+        if not it: return
+        if it.get("kind")=="shipment":
+            ShipmentDetail(self,it,self._voided)
+        else:
+            rec=it.get("rec") or {}
+            HistoryDetail(self,rec,voided=self._voided.get(str(rec.get("event_id") or "")))
     def _export_csv(self):
         """Write the currently filtered rows to a CSV chosen by the user."""
         if not self._shown:
@@ -10549,7 +10731,7 @@ class HistoryViewer(tk.Toplevel):
         try:
             with open(path,"w",newline="",encoding="utf-8-sig") as f:
                 w=csv.writer(f); w.writerow(hdr)
-                for r in self._shown:
+                for r in (e for it in self._shown for e in (it.get("timeline") or [it.get("rep") or {}])):
                     et=r.get("event_type") or ""
                     coc=r.get("coc") or {}; pk=r.get("packing") or {}
                     ph=r.get("photos") or {}; out=r.get("outputs") or {}
@@ -10561,7 +10743,7 @@ class HistoryViewer(tk.Toplevel):
                          +[str(coc.get(k) or "") for k in coc_keys]+[str(pk.get(k) or "") for k in pk_keys]
                          +[str(out.get("serials_xlsx") or ""),str(out.get("serials_docx") or ""),str(out.get("coc_xlsx") or ""),str(out.get("packing_xlsx") or ""),"; ".join(str(e).strip() for e in (r.get("errors") or [])),str(r.get("wo_folder") or ""),str(rd.get("saved_by") or ""),str(rd.get("saved_at") or ""),str(r.get("notes") or "").replace("\n"," ").replace("\r"," "),len(r.get("dup_overrides") or [])])
                     w.writerow(row)
-            messagebox.showinfo("Export complete",f"{len(self._shown)} records exported to:\n\n{path}",parent=self)
+            messagebox.showinfo("Export complete",f"Exported to:\n\n{path}",parent=self)
         except Exception as e:
             messagebox.showerror("Export failed",f"Could not write CSV:\n\n{type(e).__name__}: {e}",parent=self)
 
@@ -11104,7 +11286,10 @@ class ReceivingWindow(tk.Toplevel):
         super().__init__(app); self._app = app
         self.title("Receiving — boards returned from testing")
         self.geometry("880x720"); self.minsize(780, 600)
-        self.transient(app); self.configure(bg=C_BG)
+        # NOT transient: a transient Toplevel loses its maximize/minimize buttons on
+        # Windows (Dhruvil 2026-10-28 couldn't maximize it). Non-modal window -> normal
+        # resizable/maximizable title bar + taskbar entry.
+        self.configure(bg=C_BG)
         self._jobs = []; self._jobs_ready = False
         self._jobs_thread = None; self._jobs_box = None
         self._state = None; self._state_key = None; self._state_thread = None
@@ -12417,6 +12602,7 @@ class ShippingApp(tk.Tk):
         self.pending_photos=[]; self.serials=[]; self.packing_data=None; self.coc_data=None
         self.slip_data=None            # Shipping Slip & Labels form (Dhruvil 2026-09-24) — travels like coc_data
         self.loaded_wo=None; self.parsed_info={}; self.resumed_from_draft=None
+        self._started_at=""; self._started_by=""   # when/who started THIS shipment (set at WO load; carried into draft+close for History "Started")
         self._offline_shipment=False   # True while a locally-captured Outbox shipment is loaded
         self._monday_hit=None          # last Monday.com lookup folded into the current load
         self._monday_busy=False        # a Monday lookup worker thread is in flight
@@ -12759,6 +12945,8 @@ class ShippingApp(tk.Tk):
         self.loaded_wo=wo; self.parsed_info={"customer":"","pn":"","eng":"","rev":""}
         self.pending_photos=[]; self.serials=[]; self.packing_data=None; self.coc_data=None; self.slip_data=None
         self.resumed_from_draft=None; self._offline_shipment=True
+        self._started_at=datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        self._started_by="" if self.operator_var.get().startswith("—") else self.operator_var.get()
         self.shipment_notes=""; self.current_draft_id=None; self._reset_dup_state()   # no history index offline
         self.lbl_div.config(text=f"{div}  ·  OFFLINE",fg=C_ORANGE); self.lbl_wo.config(text=wo,fg=C_ORANGE)
         self.lbl_cust.config(text="— fill in COC / Packing —",fg=C_SUBTLE); self.lbl_pn.config(text="—",fg=C_SUBTLE)
@@ -12890,6 +13078,10 @@ class ShippingApp(tk.Tk):
             self._merge_monday(self.parsed_info)   # fill gaps + add PO/CPN (folder authoritative; hit already validated above)
             self.pending_photos=[]; self.serials=[]; self.packing_data=None; self.coc_data=None; self.slip_data=None
             self.resumed_from_draft=None; self.shipment_notes=""
+            # Stamp when/who started this shipment at WO load, so History's "Started"
+            # is the real load time. A resumed draft restores its own start below.
+            self._started_at=datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            self._started_by="" if self.operator_var.get().startswith("—") else self.operator_var.get()
             self._offline_shipment=False   # an online-loaded WO is never an offline shipment
             # Start building the serial duplicate-history index for this job in the
             # background so it's ready by the time the operator scans.
@@ -12928,6 +13120,8 @@ class ShippingApp(tk.Tk):
                 self.slip_data=draft.get("slip_data")     # None in drafts from before 2026-09-24
                 self.shipment_notes=draft.get("notes","") or ""
                 saved_at=draft.get("saved_at","earlier"); saved_by=draft.get("saved_by","")
+                if draft.get("started_at"): self._started_at=str(draft.get("started_at"))
+                if draft.get("started_by"): self._started_by=str(draft.get("started_by"))
                 self.resumed_from_draft={"saved_at": saved_at, "saved_by": saved_by}
                 tag=f" by {saved_by}" if saved_by else ""
                 extra=f" ({len(drafts)-1} other draft(s) remain)" if len(drafts)>1 else ""
@@ -13328,7 +13522,8 @@ class ShippingApp(tk.Tk):
         out=save_shipment_draft(self.wo_folder, self.pending_photos, self.serials,
                                 self.coc_data, self.packing_data, operator=op_clean,
                                 notes=self.shipment_notes, draft_id=self.current_draft_id,
-                                slip_data=self.slip_data)
+                                slip_data=self.slip_data,
+                                started_at=self._started_at, started_by=self._started_by)
         if not out:
             prog.close()
             messagebox.showerror("Save failed","Could not save draft.\n\nCheck folder permissions and try again.")
@@ -13349,6 +13544,7 @@ class ShippingApp(tk.Tk):
                 "serial_count": len(self.serials), "serials": list(self.serials),
                 "notes": self.shipment_notes or "", "dup_overrides": list(self._dup_overrides),
                 "draft_id": self.current_draft_id or "",
+                "started_at": self._started_at or "", "started_by": self._started_by or "",
                 "coc": self.coc_data or None, "packing": self.packing_data or None,
                 "slip": self.slip_data or None,
                 "photos": {"moved_count": len(moved_photos),
@@ -13629,7 +13825,8 @@ class ShippingApp(tk.Tk):
         save_shipment_draft(self.wo_folder, self.pending_photos, self.serials,
                             self.coc_data, self.packing_data, operator=op_clean,
                             notes=self.shipment_notes, draft_id=self.current_draft_id,
-                            slip_data=self.slip_data)
+                            slip_data=self.slip_data,
+                            started_at=self._started_at, started_by=self._started_by)
 
         # ───── Determine engineering # for filenames (must come BEFORE writes).
         # Priority: parsed from folder path > COC entry > Packing List entry > WO# as fallback.
@@ -13816,6 +14013,7 @@ class ShippingApp(tk.Tk):
             "critical_ok": critical_ok, "errors": list(errors),
             "resumed_from_draft": self.resumed_from_draft,
             "draft_id": self.current_draft_id or "",
+            "started_at": self._started_at or "", "started_by": self._started_by or "",
         }
         prog.step("Recording in shipment history…")
         report_update = None   # Shipping Report auto-update outcome, shown + recorded below
@@ -13944,7 +14142,8 @@ class ShippingApp(tk.Tk):
                                           self.packing_data, operator=op_clean,
                                           notes=self.shipment_notes,
                                           draft_id=self.current_draft_id,
-                                          slip_data=self.slip_data)
+                                          slip_data=self.slip_data,
+                                          started_at=self._started_at, started_by=self._started_by)
                 if saved:
                     log("DRAFT kept (user choice — will retry)")
                 else:
