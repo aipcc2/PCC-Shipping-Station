@@ -75,7 +75,7 @@ the customer sees them on their order:
   Retries 1 min, 5 min, 15 min, then hourly, up to 7 days.
 - **Visible status.** Footer (bottom right): "Portal: ✓ 3 sent today · 1 waiting · ⚠ 1 failed"; click
   it for the list and **Retry now**. A failed upload pops up a warning so the office can upload by hand.
-- **Off until set up on each PC.** Admin → Portal upload: station id + key (from the portal admin),
-  Test connection, turn on, Save. Stored only on that PC in
+- **Off until set up.** Admin → Portal upload: enter the upload key (from the portal admin; same value as
+  the portal's `SHIPPING_UPLOAD_KEY` secret), Test connection, turn on, Save. Stored only on that PC in
   `%LOCALAPPDATA%\PCC Shipping\portal_upload.json`; queue in `%LOCALAPPDATA%\PCC Shipping\portal_queue\`.
 - Tests: `py -3.12 -m unittest tests.test_pdf_docs tests.test_portal_upload -v` (run from the repo folder).

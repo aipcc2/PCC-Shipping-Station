@@ -9846,13 +9846,13 @@ class AdminPanel(tk.Toplevel):
         f=self._bd; c=portal_upload.load_config()
         tk.Label(f,text="Send CoC, Packing List and Serial list PDFs to the Customer Portal",bg=C_BG,fg=C_GREEN,font=("Segoe UI",11,"bold")).pack(anchor="w",pady=(0,4))
         tk.Label(f,text="Industrial and MAG - ITAR jobs. Anything marked export controlled / USML / CUI is never sent.\n"
-                 "Station id and key come from the portal admin (one key per PC). They are saved only on this PC.",
+                 "The upload key comes from the portal admin (Supabase secret SHIPPING_UPLOAD_KEY). It's saved only on this PC.",
                  bg=C_BG,fg=C_SUBTLE,font=("Segoe UI",9),justify="left").pack(anchor="w",pady=(0,10))
-        self._pu_en=tk.BooleanVar(value=c["enabled"]); self._pu_id=tk.StringVar(value=c["station_id"])
-        self._pu_key=tk.StringVar(value=c["station_key"]); self._pu_url=tk.StringVar(value=c["url"])
+        self._pu_en=tk.BooleanVar(value=c["enabled"])
+        self._pu_key=tk.StringVar(value=c["key"]); self._pu_url=tk.StringVar(value=c["url"])
         tk.Checkbutton(f,text="Turn on portal upload for this PC",variable=self._pu_en,bg=C_BG,font=("Segoe UI",10)).pack(anchor="w",pady=(0,6))
         g=tk.Frame(f,bg=C_BG); g.pack(fill="x")
-        for r,(l,v,kw) in enumerate([("Station id",self._pu_id,{}),("Station key",self._pu_key,{"show":"●"}),("Portal address",self._pu_url,{})]):
+        for r,(l,v,kw) in enumerate([("Upload key",self._pu_key,{"show":"●"}),("Portal address",self._pu_url,{})]):
             tk.Label(g,text=l,bg=C_BG,fg=C_MID,font=("Segoe UI",9),width=14,anchor="e").grid(row=r,column=0,padx=(0,8),pady=4)
             ttk.Entry(g,textvariable=v,font=("Segoe UI",10),width=52,**kw).grid(row=r,column=1,sticky="w",ipady=3)
         self._pu_msg=tk.Label(f,text="",bg=C_BG,fg=C_SUBTLE,font=("Segoe UI",9),wraplength=600,justify="left"); self._pu_msg.pack(anchor="w",pady=(10,4))
@@ -9860,12 +9860,12 @@ class AdminPanel(tk.Toplevel):
         _btn(br,"Test connection",self._pu_test,bg=C_DARK,fg=C_WHITE).pack(side="left")
         _btn(br,"Save",self._pu_save,bg=C_GREEN,fg=C_WHITE).pack(side="right")
     def _pu_values(self):
-        return {"enabled":self._pu_en.get(),"station_id":self._pu_id.get().strip(),
-                "station_key":self._pu_key.get().strip(),"url":self._pu_url.get().strip() or portal_upload.DEFAULT_URL}
+        return {"enabled":self._pu_en.get(),"key":self._pu_key.get().strip(),
+                "url":self._pu_url.get().strip() or portal_upload.DEFAULT_URL}
     def _pu_test(self):
         c=self._pu_values()
-        if not c["station_id"] or len(c["station_key"])<24:
-            self._pu_msg.config(text="Enter the station id and its key (at least 24 characters).",fg=C_RED); return
+        if len(c["key"])<24:
+            self._pu_msg.config(text="Enter the upload key (at least 24 characters).",fg=C_RED); return
         self._pu_msg.config(text="Checking…",fg=C_SUBTLE); self.update()
         try: ok,msg=portal_upload.ping(c)
         except Exception as e: ok,msg=False,f"{type(e).__name__}: {e}"
@@ -9873,7 +9873,7 @@ class AdminPanel(tk.Toplevel):
     def _pu_save(self):
         c=self._pu_values()
         if c["enabled"] and not portal_upload.config_ready(c):
-            self._pu_msg.config(text="Can't turn it on yet: the station id, a key of at least 24 characters and an https address are needed.",fg=C_RED); return
+            self._pu_msg.config(text="Can't turn it on yet: an upload key of at least 24 characters and an https address are needed.",fg=C_RED); return
         try: portal_upload.save_config(c)
         except Exception as e: self._pu_msg.config(text=f"Couldn't save: {e}",fg=C_RED); return
         self._pu_msg.config(text="Saved. "+("Portal upload is ON for this PC." if c["enabled"] else "Portal upload is OFF for this PC."),fg=C_GREEN)

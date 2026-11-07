@@ -14,7 +14,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 import portal_upload as pu  # noqa: E402
 
 KEY = "k" * 40
-CONFIG = {"enabled": True, "station_id": "ship-1", "station_key": KEY, "url": "https://example.test/fn"}
+CONFIG = {"enabled": True, "key": KEY, "url": "https://example.test/fn"}
 COC = {"po": "2859984-1", "ship_date": "11/5/2026", "job": "4099"}
 PL = {"po": "2859984-1", "packing_no": "PL-2207", "date": "11/5/2026"}
 
@@ -167,7 +167,7 @@ class QueueTests(Env):
 
     def test_off_until_set_up(self):
         wf, coc, pl = self.wo(self.ind)
-        for config in [{**CONFIG, "enabled": False}, {**CONFIG, "station_key": "short"}, {**CONFIG, "url": "http://x"}]:
+        for config in [{**CONFIG, "enabled": False}, {**CONFIG, "key": "short"}, {**CONFIG, "url": "http://x"}]:
             with self.subTest(config=config):
                 self.assertEqual(self.enqueue("Industrial", wf, coc, pl, config=config)[0], "off")
         self.assertEqual(pu.load_jobs(self.q), [])
@@ -184,15 +184,16 @@ class UploadTests(Env):
         job = pu.load_jobs(self.q)[0]
         return pu.process_job(job, CONFIG, send=send, now=now, qdir=self.q, **self.roots)
 
-    def test_success_sends_pdf_with_station_key_and_fields(self):
+    def test_success_sends_pdf_with_upload_key_and_fields(self):
         send = Recorder()
         job = self.run_one(send)
         self.assertEqual(job["status"], "done")
         self.assertEqual(job["document_id"], "doc-1")
         url, headers, body = send.calls[0]
         self.assertEqual(url, CONFIG["url"])
-        self.assertEqual(headers["x-station-id"], "ship-1")
-        self.assertEqual(headers["x-station-key"], KEY)
+        self.assertEqual(headers["x-shipping-key"], KEY)
+        self.assertNotIn("x-station-id", headers)
+        self.assertNotIn(b'name="station"', body)
         for part in [b'name="division"\r\n\r\nIndustrial', b'name="doc_type"\r\n\r\nCoC', b'name="work_order"\r\n\r\n16691.1',
                      b'name="po_number"\r\n\r\n2859984-1', b'filename="4099-11-5-26-COC.pdf"', b"%PDF-1.7 test"]:
             self.assertIn(part, body)
