@@ -6,7 +6,7 @@ How it works
      needed), then calls enqueue_shipment(). That only writes a small job file on this PC, so shipping
      is never slowed down or blocked.
   2. A background thread (PortalUploader) picks up each job and sends the PDF to the portal's
-     ingest-shipping-docs function with this station's id and key.
+     ingest-shipping-docs function with the shipping upload key.
   3. If the portal or the network is down, the job waits and retries (1 min, 5 min, 15 min, then
      hourly, for up to 7 days). Jobs the portal refuses for a reason that won't fix itself are marked
      failed and shown to the operator.
@@ -19,7 +19,9 @@ doesn't match the division), or whose folder/file names or fields carry an expor
 the job is queued, again when the worker picks it up, and again right before upload. The portal checks too.
 
 Settings live on each PC (never on the network share, never in git):
-  %LOCALAPPDATA%\\PCC Shipping\\portal_upload.json  ->  {"enabled", "station_id", "station_key", "url"}
+  %LOCALAPPDATA%\\PCC Shipping\\portal_upload.json  ->  {"enabled", "key", "url"}
+There is ONE shipping station, so there is one key (the same value as the portal's SHIPPING_UPLOAD_KEY
+secret). It's what proves an upload really comes from the shipping app.
 Upload is OFF until an admin turns it on in Admin -> Portal upload.
 """
 
@@ -149,8 +151,7 @@ def load_config():
         c = {}
     return {
         "enabled": bool(c.get("enabled")),
-        "station_id": str(c.get("station_id") or ""),
-        "station_key": str(c.get("station_key") or ""),
+        "key": str(c.get("key") or ""),
         "url": str(c.get("url") or DEFAULT_URL),
     }
 
@@ -162,8 +163,7 @@ def save_config(c):
 
 
 def config_ready(c):
-    return bool(c.get("enabled") and re.fullmatch(r"[A-Za-z0-9-]{1,32}", c.get("station_id") or "")
-                and len(c.get("station_key") or "") >= 24 and str(c.get("url", "")).startswith("https://"))
+    return bool(c.get("enabled") and len(c.get("key") or "") >= 24 and str(c.get("url", "")).startswith("https://"))
 
 
 ###############################################################################
@@ -303,12 +303,12 @@ def classify(status, body):
 
 
 def ping(config, send=http_send):
-    """Checks the station id and key with the portal. Returns (ok, message)."""
+    """Checks the key with the portal. Returns (ok, message)."""
     body, ctype = _multipart({"ping": "1"}, "none", "none.pdf", b"")
-    status, data = send(config["url"], {"x-station-id": config["station_id"], "x-station-key": config["station_key"],
+    status, data = send(config["url"], {"x-shipping-key": config["key"],
                                         "Content-Type": ctype}, body)
     if status == 200 and (data or {}).get("pong"):
-        return True, f"Connected as station '{config['station_id']}'."
+        return True, "Connected to the Customer Portal."
     data = data or {}
     if status == 404 and not data.get("error"):
         return False, "The portal's upload function isn't set up yet (HTTP 404)."
@@ -322,7 +322,6 @@ def upload_job(job, config, send=http_send, industrial_root=INDUSTRIAL_ROOT, ita
     data = pdf.read_bytes()
     meta = job.get("meta") or {}
     fields = {
-        "station": config["station_id"],
         "division": job["division"],
         "doc_type": job["doc_type"],
         "work_order": meta.get("work_order", ""),
@@ -334,7 +333,7 @@ def upload_job(job, config, send=http_send, industrial_root=INDUSTRIAL_ROOT, ita
         "source_path": str(pdf),
     }
     body, ctype = _multipart(fields, "file", pdf.name, data)
-    headers = {"x-station-id": config["station_id"], "x-station-key": config["station_key"], "Content-Type": ctype}
+    headers = {"x-shipping-key": config["key"], "Content-Type": ctype}
     status, resp = send(config["url"], headers, body)
     outcome = classify(status, resp)
     msg = (resp or {}).get("error") or ("Filed in the portal." if outcome == "done" else f"HTTP {status}")
