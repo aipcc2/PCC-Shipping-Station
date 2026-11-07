@@ -38,5 +38,8 @@ operators.json
 *.log
 # The PyInstaller spec IS the build recipe (build_exe.bat runs it)
 !PCC Shipping App.spec
+# Customer Portal upload key (bundled into the exe at build time; never commit)
+portal_key.txt
+
 # Frozen copy of the Apex HTML app (tests/fixtures) holds plaintext PINs + an API key: never commit
 tests/fixtures/

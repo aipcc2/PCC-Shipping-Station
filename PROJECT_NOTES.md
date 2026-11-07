@@ -147,8 +147,9 @@ After PCC2 returns, copy each Outbox shipment's four subfolders into the real WO
   Requested by Sahil (approved 2026-11-06). Save and Close now writes a PDF next to each .xlsx (CoC, Packing
   List, Serial list) drawn by the new `pdf_docs.py` (reportlab; the shipping PCs have no Excel), then queues
   them for the PCC Customer Portal via the new `portal_upload.py` (background thread, retries, footer status,
-  Portal uploads window, pop-up on a permanent failure, Admin → Portal upload tab; OFF until the upload key is
-  entered — one key, no station id, since PCC has one shipping station). Both Industrial AND MAG - ITAR jobs are sent (Sahil 2026-11-07: CoC / packing list /
+  Portal uploads window, pop-up on a permanent failure). Nothing to set up on the shipping PC (Sahil): the one
+  upload key (no station id — PCC has one shipping station) is built into the exe from a git-ignored
+  `portal_key.txt` next to app_logic.py at build time; same value as the portal's SHIPPING_UPLOAD_KEY. Both Industrial AND MAG - ITAR jobs are sent (Sahil 2026-11-07: CoC / packing list /
   serial list are not ITAR CUI); the guard refuses other divisions, files outside the division's share
   folder (incl. offline Outbox shipments) and anything marked export controlled / USML / technical data /
   CUI — checked three times. `app_logic.py` changes are hooks only (imports, the close,

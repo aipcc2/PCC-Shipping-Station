@@ -18,17 +18,18 @@ doesn't match the division), or whose folder/file names or fields carry an expor
 (export controlled, USML, technical data, CUI, 22 CFR 120-130, International Traffic in Arms). It runs when
 the job is queued, again when the worker picks it up, and again right before upload. The portal checks too.
 
-Settings live on each PC (never on the network share, never in git):
-  %LOCALAPPDATA%\\PCC Shipping\\portal_upload.json  ->  {"enabled", "key", "url"}
-There is ONE shipping station, so there is one key (the same value as the portal's SHIPPING_UPLOAD_KEY
-secret). It's what proves an upload really comes from the shipping app.
-Upload is OFF until an admin turns it on in Admin -> Portal upload.
+The upload key is BUILT INTO the app (Sahil, 2026-11-07: nothing to set up on the shipping PC). At build
+time, `portal_key.txt` next to app_logic.py is bundled into the exe (see "PCC Shipping App.spec"); it holds
+the same value as the portal's Supabase secret SHIPPING_UPLOAD_KEY. The file is git-ignored, so the key
+never goes to GitHub. With the key built in, upload is simply on; an exe built without it doesn't upload
+(the footer says so). The only thing kept on the PC is the upload queue (%LOCALAPPDATA%\\PCC Shipping\\).
 """
 
 import datetime
 import json
 import os
 import re
+import sys
 import threading
 import time
 import urllib.error
@@ -65,8 +66,17 @@ def queue_dir():
     return local_dir() / "portal_queue"
 
 
-def config_path():
-    return local_dir() / "portal_upload.json"
+KEY_FILE = "portal_key.txt"
+
+
+def _key_file_candidates():
+    """Where the built-in key lives: inside the exe (PyInstaller unpacks bundled files to sys._MEIPASS),
+    or next to this file when running from source."""
+    out = []
+    if hasattr(sys, "_MEIPASS"):
+        out.append(Path(sys._MEIPASS) / KEY_FILE)
+    out.append(Path(__file__).resolve().parent / KEY_FILE)
+    return out
 
 
 ###############################################################################
@@ -148,23 +158,21 @@ def _check_job(job, industrial_root=INDUSTRIAL_ROOT, itar_root=ITAR_ROOT):
 # SETTINGS
 ###############################################################################
 
-def load_config():
-    try:
-        with open(config_path(), encoding="utf-8") as f:
-            c = json.load(f)
-    except Exception:
-        c = {}
-    return {
-        "enabled": bool(c.get("enabled")),
-        "key": str(c.get("key") or ""),
-        "url": str(c.get("url") or DEFAULT_URL),
-    }
+def built_in_key(candidates=None):
+    """The upload key built into this app, or '' when this build has none."""
+    for path in (candidates if candidates is not None else _key_file_candidates()):
+        try:
+            key = Path(path).read_text(encoding="utf-8").strip()
+            if key:
+                return key
+        except Exception:
+            pass
+    return ""
 
 
-def save_config(c):
-    local_dir().mkdir(parents=True, exist_ok=True)
-    with open(config_path(), "w", encoding="utf-8") as f:
-        json.dump(c, f, indent=2)
+def load_config(candidates=None):
+    key = built_in_key(candidates)
+    return {"enabled": bool(key), "key": key, "url": DEFAULT_URL}
 
 
 def config_ready(c):
@@ -305,19 +313,6 @@ def classify(status, body):
     if body.get("retry") is True:
         return "retry"
     return "failed"
-
-
-def ping(config, send=http_send):
-    """Checks the key with the portal. Returns (ok, message)."""
-    body, ctype = _multipart({"ping": "1"}, "none", "none.pdf", b"")
-    status, data = send(config["url"], {"x-shipping-key": config["key"],
-                                        "Content-Type": ctype}, body)
-    if status == 200 and (data or {}).get("pong"):
-        return True, "Connected to the Customer Portal."
-    data = data or {}
-    if status == 404 and not data.get("error"):
-        return False, "The portal's upload function isn't set up yet (HTTP 404)."
-    return False, data.get("error") or data.get("message") or f"No answer from the portal (HTTP {status})."
 
 
 def upload_job(job, config, send=http_send, industrial_root=INDUSTRIAL_ROOT, itar_root=ITAR_ROOT):

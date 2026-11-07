@@ -151,6 +151,31 @@ class GuardTests(Env):
         self.assertEqual(send.calls, [])
 
 
+class BuiltInKeyTests(Env):
+    """The upload key is built into the app (portal_key.txt bundled at build time): nothing to set up on the PC."""
+
+    def test_key_file_turns_upload_on(self):
+        f = Path(self.tmp.name) / "portal_key.txt"
+        f.write_text("  " + KEY + "\r\n", encoding="utf-8")   # spaces / newline around it are fine
+        c = pu.load_config([f])
+        self.assertEqual(c, {"enabled": True, "key": KEY, "url": pu.DEFAULT_URL})
+        self.assertTrue(pu.config_ready(c))
+
+    def test_no_key_in_the_build_means_off(self):
+        missing = Path(self.tmp.name) / "nope.txt"
+        empty = Path(self.tmp.name) / "empty.txt"
+        empty.write_text("   ", encoding="utf-8")
+        for candidates in ([missing], [empty], []):
+            with self.subTest(candidates=candidates):
+                c = pu.load_config(candidates)
+                self.assertFalse(c["enabled"])
+                self.assertFalse(pu.config_ready(c))
+
+    def test_key_is_never_committed(self):
+        repo = Path(__file__).resolve().parent.parent
+        self.assertIn("portal_key.txt", (repo / ".gitignore").read_text(encoding="utf-8"))
+
+
 class QueueTests(Env):
     def test_queues_coc_packing_list_and_serial_list(self):
         wf, coc, pl = self.wo(self.ind)

@@ -9827,7 +9827,7 @@ class AdminPanel(tk.Toplevel):
         h=tk.Frame(self,bg=C_DARK); h.pack(fill="x")
         tk.Label(h,text="Admin Panel — Printed Circuits Corp",bg=C_DARK,fg=C_WHITE,font=("Segoe UI",13,"bold")).pack(side="left",padx=20,pady=13)
         tb=tk.Frame(self,bg="#DCDCDC"); tb.pack(fill="x"); self._tb={}
-        for k,l in [("op","  Operators  "),("ad","  Administrators  "),("bx","  Box sizes  "),("pu","  Portal upload  ")]:
+        for k,l in [("op","  Operators  "),("ad","  Administrators  "),("bx","  Box sizes  ")]:
             b=tk.Button(tb,text=l,relief="flat",cursor="hand2",font=("Segoe UI",10,"bold"),pady=10,command=lambda x=k: self._st(x))
             b.pack(side="left"); self._tb[k]=b
         tk.Label(self,text="Changes are saved immediately",bg=C_BG,fg=C_SUBTLE,
@@ -9839,44 +9839,7 @@ class AdminPanel(tk.Toplevel):
         for w in self._bd.winfo_children(): w.destroy()
         if k=="op": self._top()
         elif k=="bx": self._tbx()
-        elif k=="pu": self._tpu()
         else: self._tad()
-    def _tpu(self):
-        """Customer Portal upload settings for THIS PC (saved locally, never on the share)."""
-        f=self._bd; c=portal_upload.load_config()
-        tk.Label(f,text="Send CoC, Packing List and Serial list PDFs to the Customer Portal",bg=C_BG,fg=C_GREEN,font=("Segoe UI",11,"bold")).pack(anchor="w",pady=(0,4))
-        tk.Label(f,text="Industrial and MAG - ITAR jobs. Anything marked export controlled / USML / CUI is never sent.\n"
-                 "The upload key comes from the portal admin (Supabase secret SHIPPING_UPLOAD_KEY). It's saved only on this PC.",
-                 bg=C_BG,fg=C_SUBTLE,font=("Segoe UI",9),justify="left").pack(anchor="w",pady=(0,10))
-        self._pu_en=tk.BooleanVar(value=c["enabled"])
-        self._pu_key=tk.StringVar(value=c["key"]); self._pu_url=tk.StringVar(value=c["url"])
-        tk.Checkbutton(f,text="Turn on portal upload for this PC",variable=self._pu_en,bg=C_BG,font=("Segoe UI",10)).pack(anchor="w",pady=(0,6))
-        g=tk.Frame(f,bg=C_BG); g.pack(fill="x")
-        for r,(l,v,kw) in enumerate([("Upload key",self._pu_key,{"show":"●"}),("Portal address",self._pu_url,{})]):
-            tk.Label(g,text=l,bg=C_BG,fg=C_MID,font=("Segoe UI",9),width=14,anchor="e").grid(row=r,column=0,padx=(0,8),pady=4)
-            ttk.Entry(g,textvariable=v,font=("Segoe UI",10),width=52,**kw).grid(row=r,column=1,sticky="w",ipady=3)
-        self._pu_msg=tk.Label(f,text="",bg=C_BG,fg=C_SUBTLE,font=("Segoe UI",9),wraplength=600,justify="left"); self._pu_msg.pack(anchor="w",pady=(10,4))
-        br=tk.Frame(f,bg=C_BG); br.pack(fill="x",pady=4)
-        _btn(br,"Test connection",self._pu_test,bg=C_DARK,fg=C_WHITE).pack(side="left")
-        _btn(br,"Save",self._pu_save,bg=C_GREEN,fg=C_WHITE).pack(side="right")
-    def _pu_values(self):
-        return {"enabled":self._pu_en.get(),"key":self._pu_key.get().strip(),
-                "url":self._pu_url.get().strip() or portal_upload.DEFAULT_URL}
-    def _pu_test(self):
-        c=self._pu_values()
-        if len(c["key"])<24:
-            self._pu_msg.config(text="Enter the upload key (at least 24 characters).",fg=C_RED); return
-        self._pu_msg.config(text="Checking…",fg=C_SUBTLE); self.update()
-        try: ok,msg=portal_upload.ping(c)
-        except Exception as e: ok,msg=False,f"{type(e).__name__}: {e}"
-        self._pu_msg.config(text=("✓ " if ok else "✗ ")+msg,fg=C_GREEN if ok else C_RED)
-    def _pu_save(self):
-        c=self._pu_values()
-        if c["enabled"] and not portal_upload.config_ready(c):
-            self._pu_msg.config(text="Can't turn it on yet: an upload key of at least 24 characters and an https address are needed.",fg=C_RED); return
-        try: portal_upload.save_config(c)
-        except Exception as e: self._pu_msg.config(text=f"Couldn't save: {e}",fg=C_RED); return
-        self._pu_msg.config(text="Saved. "+("Portal upload is ON for this PC." if c["enabled"] else "Portal upload is OFF for this PC."),fg=C_GREEN)
     def _top(self):
         f=self._bd; tk.Label(f,text="Operator roster",bg=C_BG,fg=C_GREEN,font=("Segoe UI",11,"bold")).pack(anchor="w",pady=(0,8))
         lf=tk.Frame(f,bg=C_WHITE,highlightbackground=C_BORDER,highlightthickness=1); lf.pack(fill="both",expand=True)
@@ -12722,7 +12685,7 @@ class ShippingApp(tk.Tk):
         if lbl is None: return
         try:
             if not portal_upload.config_ready(portal_upload.load_config()):
-                lbl.config(text="Portal upload: off",fg=C_SUBTLE); return
+                lbl.config(text="Portal upload: off (no key in this build)",fg=C_SUBTLE); return
             s=portal_upload.summary()
         except Exception:
             return
