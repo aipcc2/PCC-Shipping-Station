@@ -206,9 +206,21 @@ class UploadTests(Env):
         self.assertEqual(job["status"], "pending")
         self.assertEqual(job["next_try_at"], now + 60)
 
-    def test_work_order_not_in_portal_yet_retries(self):
-        job = self.run_one(Recorder(status=404, body={"ok": False, "code": "work_order_not_in_portal", "retry": True}))
+    def test_work_order_not_in_portal_is_quiet_then_skipped(self):
+        """Not every work order is on the portal: retry quietly for a day, then skip — never a failure."""
+        answer = Recorder(status=404, body={"ok": False, "code": "work_order_not_in_portal", "retry": True})
+        job = self.run_one(answer)
         self.assertEqual(job["status"], "pending")
+        self.assertEqual(pu.summary(pu.load_jobs(self.q)), {"waiting": 0, "failed": 0, "sent_today": 0})
+        job["created_at"] -= 25 * 3600
+        job = pu.process_job(job, CONFIG, send=answer, qdir=self.q, **self.roots)
+        self.assertEqual(job["status"], "skipped")
+        self.assertIn("Not in the Customer Portal", job["last_error"])
+        self.assertEqual(pu.summary(pu.load_jobs(self.q)), {"waiting": 0, "failed": 0, "sent_today": 0})
+
+    def test_other_waiting_jobs_still_count(self):
+        self.run_one(Recorder(status=503, body={}))
+        self.assertEqual(pu.summary(pu.load_jobs(self.q))["waiting"], 1)
 
     def test_refusal_is_marked_failed(self):
         job = self.run_one(Recorder(status=409, body={"ok": False, "code": "po_mismatch", "error": "PO doesn't match", "retry": False}))

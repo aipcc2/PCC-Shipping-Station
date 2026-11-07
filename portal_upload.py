@@ -43,6 +43,11 @@ DIVISIONS = ("Industrial", "MAG - ITAR")   # both go to the portal (Sahil, 2026-
 
 RETRY_DELAYS = [60, 300, 900, 3600]   # seconds; after the last one, hourly
 GIVE_UP_AFTER = 7 * 24 * 3600         # a job older than this is marked failed
+# Not every work order is in the portal (Sahil, 2026-11-07) — that's normal, not a failure. The portal
+# answers code "work_order_not_in_portal"; the app keeps trying quietly for a day (in case the Monday
+# sync hasn't caught up with a brand-new order), then marks the job "skipped": no pop-up, no red count.
+NOT_IN_PORTAL = "work_order_not_in_portal"
+NOT_IN_PORTAL_WAIT = 24 * 3600
 HTTP_TIMEOUT = 60
 
 DOC_COC = "CoC"
@@ -358,7 +363,14 @@ def process_job(job, config, send=http_send, now=None, qdir=None,
     job["attempts"] = job.get("attempts", 0) + 1
     job["last_try_at"] = now
     job["last_error"] = "" if outcome == "done" else msg
-    if outcome == "done":
+    job["last_code"] = (resp or {}).get("code") or ""
+    not_in_portal = job["last_code"] == NOT_IN_PORTAL
+    if not_in_portal:
+        job["last_error"] = "This work order isn't in the Customer Portal."
+    if not_in_portal and now - job.get("created_at", now) > NOT_IN_PORTAL_WAIT:
+        job["status"] = "skipped"
+        job["last_error"] = "Not in the Customer Portal — skipped (normal for orders that aren't on the portal)."
+    elif outcome == "done":
         job["status"] = "done"
         job["document_id"] = (resp or {}).get("document_id")
     elif outcome in ("failed", "blocked"):
@@ -384,7 +396,7 @@ def prune(qdir=None, keep_days=30):
     """Removes finished jobs older than keep_days so the queue folder stays small."""
     cutoff = _now() - keep_days * 86400
     for job in load_jobs(qdir):
-        if job.get("status") in ("done", "blocked") and job.get("last_try_at", 0) < cutoff:
+        if job.get("status") in ("done", "blocked", "skipped") and job.get("last_try_at", 0) < cutoff:
             try:
                 (Path(qdir or queue_dir()) / f"{job['id']}.json").unlink()
             except Exception:
@@ -435,10 +447,11 @@ class PortalUploader(threading.Thread):
 
 
 def summary(jobs=None):
-    """Counts for the footer: waiting, failed, sent today."""
+    """Counts for the footer: waiting, failed, sent today. Jobs whose work order isn't in the portal are
+    not counted as waiting (that's normal); skipped jobs aren't counted at all."""
     jobs = load_jobs() if jobs is None else jobs
     today = datetime.date.today()
-    waiting = sum(1 for j in jobs if j.get("status") == "pending")
+    waiting = sum(1 for j in jobs if j.get("status") == "pending" and j.get("last_code") != NOT_IN_PORTAL)
     failed = sum(1 for j in jobs if j.get("status") == "failed")
     sent_today = sum(1 for j in jobs if j.get("status") == "done"
                      and datetime.date.fromtimestamp(j.get("last_try_at", 0)) == today)

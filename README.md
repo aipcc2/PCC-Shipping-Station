@@ -72,7 +72,9 @@ the customer sees them on their order:
   queued, when the uploader picks it up, and right before upload. Offline (Outbox) shipments are not
   sent. The portal checks the same markings.
 - **Never blocks shipping.** Close only writes a small job file on the PC; a background thread uploads.
-  Retries 1 min, 5 min, 15 min, then hourly, up to 7 days.
+  Retries 1 min, 5 min, 15 min, then hourly, up to 7 days. Not every work order is on the portal: one that
+  isn't is retried quietly for a day (in case Monday hasn't synced it yet), then skipped — no pop-up,
+  not counted as waiting or failed.
 - **Visible status.** Footer (bottom right): "Portal: ✓ 3 sent today · 1 waiting · ⚠ 1 failed"; click
   it for the list and **Retry now**. A failed upload pops up a warning so the office can upload by hand.
 - **Off until set up.** Admin → Portal upload: enter the upload key (from the portal admin; same value as

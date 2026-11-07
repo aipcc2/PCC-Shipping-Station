@@ -10070,7 +10070,7 @@ def _hist_event_time(r):
 
 class PortalQueueDialog(tk.Toplevel):
     """This PC's Customer Portal uploads (newest first) with a Retry now button."""
-    LABELS={"pending":"Waiting","done":"Sent","failed":"FAILED","blocked":"Not sent (blocked)"}
+    LABELS={"pending":"Waiting","done":"Sent","failed":"FAILED","blocked":"Not sent (blocked)","skipped":"Not in portal (skipped)"}
     def __init__(self,parent,uploader):
         super().__init__(parent); self.title("Portal uploads"); self.geometry("780x420"); self.configure(bg=C_BG)
         self.transient(parent); self._up=uploader

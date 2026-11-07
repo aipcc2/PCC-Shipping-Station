@@ -154,7 +154,9 @@ After PCC2 returns, copy each Outbox shipment's four subfolders into the real WO
   CUI — checked three times. `app_logic.py` changes are hooks only (imports, the close,
   footer, Admin tab, PortalQueueDialog); history close records gain `outputs.*_pdf` and `portal`.
   Spec + build_exe.bat add reportlab. Re-emit paperwork still rebuilds the .xlsx only (no PDF) — follow-up.
-  **Tests:** new tests/test_pdf_docs.py + tests/test_portal_upload.py (26, green); the seven existing suites
+  Work orders that aren't on the portal are normal (Sahil): retried quietly for a day, then 'skipped' — no
+  pop-up, not counted in the footer.
+  **Tests:** new tests/test_pdf_docs.py + tests/test_portal_upload.py (27, green); the seven existing suites
   give identical results before/after. Test exe build OK (reportlab + both modules inside).
 
 - **2026-10-28 (v64 — HISTORY: ONE ROW PER SHIPMENT + ENG# SEARCH; RECEIVING WINDOW MAXIMIZES; exe rebuilt 10/28)**
