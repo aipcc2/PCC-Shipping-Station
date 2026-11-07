@@ -22,7 +22,7 @@ from tkinter import ttk, messagebox, filedialog
 import shutil, csv, datetime, json, sys, hashlib, os, re, time, socket
 import queue as _queue
 from pathlib import Path
-import portal_upload   # Customer Portal upload: queue + background sender + ITAR guard (portal_upload.py)
+import portal_upload   # Customer Portal upload: queue + background sender + upload guard (portal_upload.py)
 try:
     import pdf_docs    # PDF copies of the CoC / Packing List / Serial list (pdf_docs.py, needs reportlab)
 except ImportError:
@@ -9845,7 +9845,7 @@ class AdminPanel(tk.Toplevel):
         """Customer Portal upload settings for THIS PC (saved locally, never on the share)."""
         f=self._bd; c=portal_upload.load_config()
         tk.Label(f,text="Send CoC, Packing List and Serial list PDFs to the Customer Portal",bg=C_BG,fg=C_GREEN,font=("Segoe UI",11,"bold")).pack(anchor="w",pady=(0,4))
-        tk.Label(f,text="Industrial jobs only. MAG - ITAR jobs are never sent.\n"
+        tk.Label(f,text="Industrial and MAG - ITAR jobs. Anything marked export controlled / USML / CUI is never sent.\n"
                  "Station id and key come from the portal admin (one key per PC). They are saved only on this PC.",
                  bg=C_BG,fg=C_SUBTLE,font=("Segoe UI",9),justify="left").pack(anchor="w",pady=(0,10))
         self._pu_en=tk.BooleanVar(value=c["enabled"]); self._pu_id=tk.StringVar(value=c["station_id"])
@@ -10070,7 +10070,7 @@ def _hist_event_time(r):
 
 class PortalQueueDialog(tk.Toplevel):
     """This PC's Customer Portal uploads (newest first) with a Retry now button."""
-    LABELS={"pending":"Waiting","done":"Sent","failed":"FAILED","blocked":"Not sent (ITAR guard)"}
+    LABELS={"pending":"Waiting","done":"Sent","failed":"FAILED","blocked":"Not sent (blocked)"}
     def __init__(self,parent,uploader):
         super().__init__(parent); self.title("Portal uploads"); self.geometry("780x420"); self.configure(bg=C_BG)
         self.transient(parent); self._up=uploader
@@ -14092,8 +14092,8 @@ class ShippingApp(tk.Tk):
                 log(f"PACKING LIST FAILED: {pl_err}\n{traceback.format_exc()}")
 
         # ───── Customer Portal: queue the CoC / Packing List / Serial list PDFs.
-        # Industrial only — MAG - ITAR (and anything outside the Industrial share,
-        # e.g. an offline Outbox shipment) is refused inside enqueue_shipment().
+        # Industrial and MAG - ITAR jobs (Sahil 2026-11-07). enqueue_shipment() refuses
+        # files outside the division's share folder and anything marked export controlled.
         # Only writes a small job file; a background thread uploads. Never blocks the close.
         if self._offline_shipment:
             portal_status, portal_msg = "offline", "Not sent (offline shipment — file it on the share first)."

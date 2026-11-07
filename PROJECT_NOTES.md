@@ -148,11 +148,13 @@ After PCC2 returns, copy each Outbox shipment's four subfolders into the real WO
   List, Serial list) drawn by the new `pdf_docs.py` (reportlab; the shipping PCs have no Excel), then queues
   them for the PCC Customer Portal via the new `portal_upload.py` (background thread, retries, footer status,
   Portal uploads window, pop-up on a permanent failure, Admin → Portal upload tab; OFF until a station key is
-  entered on that PC). HARD RULE: MAG - ITAR jobs are never sent (division + path + text guard, three times;
-  offline Outbox shipments are not sent either). `app_logic.py` changes are hooks only (imports, the close,
+  entered on that PC). Both Industrial AND MAG - ITAR jobs are sent (Sahil 2026-11-07: CoC / packing list /
+  serial list are not ITAR CUI); the guard refuses other divisions, files outside the division's share
+  folder (incl. offline Outbox shipments) and anything marked export controlled / USML / technical data /
+  CUI — checked three times. `app_logic.py` changes are hooks only (imports, the close,
   footer, Admin tab, PortalQueueDialog); history close records gain `outputs.*_pdf` and `portal`.
   Spec + build_exe.bat add reportlab. Re-emit paperwork still rebuilds the .xlsx only (no PDF) — follow-up.
-  **Tests:** new tests/test_pdf_docs.py + tests/test_portal_upload.py (25, green); the seven existing suites
+  **Tests:** new tests/test_pdf_docs.py + tests/test_portal_upload.py (26, green); the seven existing suites
   give identical results before/after. Test exe build OK (reportlab + both modules inside).
 
 - **2026-10-28 (v64 — HISTORY: ONE ROW PER SHIPMENT + ENG# SEARCH; RECEIVING WINDOW MAXIMIZES; exe rebuilt 10/28)**

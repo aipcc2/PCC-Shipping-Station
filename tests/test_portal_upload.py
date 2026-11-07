@@ -59,53 +59,69 @@ class Env(unittest.TestCase):
                                    qdir=self.q, **self.roots, **kw)
 
 
-class ItarGuardTests(Env):
-    """HARD RULE: nothing from MAG - ITAR ever leaves the PC."""
+class GuardTests(Env):
+    """Industrial AND MAG - ITAR jobs go to the portal (Sahil, 2026-11-07). Still blocked: unknown divisions,
+    files outside the division's own share folder, and anything carrying an export-control marking."""
 
     def test_industrial_job_is_allowed(self):
         wf, coc, pl = self.wo(self.ind)
-        self.assertIsNone(pu.itar_reason("Industrial", [wf, coc, pl], ["2859984-1"], **self.roots))
+        self.assertIsNone(pu.block_reason("Industrial", [wf, coc, pl], ["2859984-1"], **self.roots))
 
-    def test_itar_division_is_blocked_and_nothing_is_queued(self):
+    def test_mag_itar_job_is_allowed_and_queued(self):
         wf, coc, pl = self.wo(self.itar)
         status, msg = self.enqueue("MAG - ITAR", wf, coc, pl)
-        self.assertEqual(status, "blocked")
-        self.assertEqual(pu.load_jobs(self.q), [])
+        self.assertEqual(status, "queued")
+        jobs = pu.load_jobs(self.q)
+        self.assertEqual(len(jobs), 2)
+        self.assertEqual({j["division"] for j in jobs}, {"MAG - ITAR"})
 
-    def test_itar_folder_is_blocked_even_if_division_says_industrial(self):
+    def test_mag_itar_job_uploads_with_its_division(self):
         wf, coc, pl = self.wo(self.itar)
-        status, msg = self.enqueue("Industrial", wf, coc, pl)
-        self.assertEqual(status, "blocked")
-        self.assertIn("MAG - ITAR", msg)
+        self.enqueue("MAG - ITAR", wf, coc, None)
+        send = Recorder()
+        job = pu.process_job(pu.load_jobs(self.q)[0], CONFIG, send=send, qdir=self.q, **self.roots)
+        self.assertEqual(job["status"], "done")
+        self.assertIn(b'name="division"\r\n\r\nMAG - ITAR', send.calls[0][2])
+
+    def test_folder_must_match_the_division(self):
+        iwf, icoc, ipl = self.wo(self.itar)
+        self.assertEqual(self.enqueue("Industrial", iwf, icoc, ipl)[0], "blocked")
+        wf, coc, pl = self.wo(self.ind, customer="90 Other")
+        self.assertEqual(self.enqueue("MAG - ITAR", wf, coc, pl)[0], "blocked")
         self.assertEqual(pu.load_jobs(self.q), [])
 
     def test_real_network_paths(self):
         industrial = r"\\PCC2\PCC-I-Shares\Production\Industrial\89 Anduril\4099 [4099 Rev. B]\Production Data\16691.1"
-        for path in [r"\\PCC2\PCC-I-Shares\Production\MAG - ITAR\X\Y\Production Data\16691.1",
-                     r"\\pcc2\pcc-i-shares\production\mag - itar\x",
-                     "//PCC2/PCC-I-Shares/Production/MAG - ITAR/x",
-                     industrial + r"\ITAR copy",
-                     industrial.replace("89 Anduril", "89 Anduril (ITAR)"),
-                     r"C:\Users\op\Desktop\16691.1",
-                     r"\\PCC2\PCC-I-Shares\Production\Industrial-ITAR\x"]:
-            with self.subTest(path=path):
-                self.assertIsNotNone(pu.itar_reason("Industrial", [path]))
-        self.assertIsNone(pu.itar_reason("Industrial", [industrial]))
+        itar = r"\\PCC2\PCC-I-Shares\Production\MAG - ITAR\12 Customer\5001 [5001 Rev. A]\Production Data\17001.1"
+        self.assertIsNone(pu.block_reason("Industrial", [industrial]))
+        self.assertIsNone(pu.block_reason("MAG - ITAR", [itar]))
+        self.assertIsNone(pu.block_reason("MAG - ITAR", ["//pcc2/pcc-i-shares/production/mag - itar/x/y"]))
+        for division, path in [("Industrial", itar),
+                               ("MAG - ITAR", industrial),
+                               ("Industrial", r"C:\Users\op\AppData\Local\PCC Shipping App\OfflineOutbox\x"),
+                               ("Industrial", r"\\PCC2\PCC-I-Shares\Production\Industrial-Old\x"),
+                               ("Industrial", industrial + r"\Export Controlled copy"),
+                               ("MAG - ITAR", itar.replace("12 Customer", "12 Customer (CUI)"))]:
+            with self.subTest(division=division, path=path):
+                self.assertIsNotNone(pu.block_reason(division, [path]))
 
-    def test_division_must_be_exactly_industrial(self):
-        for division in ["MAG - ITAR", "industrial", "Industrial ", "", None]:
+    def test_only_the_two_divisions(self):
+        for division in ["industrial", "Industrial ", "MAG-ITAR", "", None]:
             with self.subTest(division=division):
-                self.assertIsNotNone(pu.itar_reason(division, []))
+                self.assertIsNotNone(pu.block_reason(division, []))
 
-    def test_itar_words_in_shipment_details_are_blocked(self):
-        wf, coc, pl = self.wo(self.ind)
-        for text in ["ITAR", "export controlled", "USML Cat XI"]:
+    def test_export_control_markings_are_blocked(self):
+        wf, coc, pl = self.wo(self.itar)
+        for text in ["EXPORT CONTROLLED", "USML Cat XI", "Contains technical data", "CUI//SP-EXPT",
+                     "22 CFR 120.10", "International Traffic in Arms Regulations"]:
             with self.subTest(text=text):
-                self.assertIsNotNone(pu.itar_reason("Industrial", [wf], [text], **self.roots))
-        self.assertIsNone(pu.itar_reason("Industrial", [wf], ["Guitar pedal board"], **self.roots))
+                self.assertIsNotNone(pu.block_reason("MAG - ITAR", [wf], [text], **self.roots))
+        for ok in ["ITAR", "MAG - ITAR", "Guitar pedal board", "Cuisinart", "PL-2207"]:
+            with self.subTest(ok=ok):
+                self.assertIsNone(pu.block_reason("MAG - ITAR", [wf], [ok], **self.roots))
 
-    def test_edited_queue_file_still_cannot_upload_itar(self):
-        """Someone edits a queued job to point at an ITAR file: the worker refuses and never calls the network."""
+    def test_edited_queue_file_cannot_upload_from_the_wrong_place(self):
+        """A queued job edited to point outside its division's folder: the worker refuses and never calls the network."""
         wf, coc, pl = self.wo(self.ind)
         self.enqueue("Industrial", wf, coc, pl)
         iwf, icoc, ipl = self.wo(self.itar)
@@ -116,21 +132,21 @@ class ItarGuardTests(Env):
             self.assertEqual(job["status"], "blocked")
         self.assertEqual(send.calls, [])
 
-    def test_edited_division_cannot_upload(self):
+    def test_edited_marking_cannot_upload(self):
         wf, coc, pl = self.wo(self.ind)
         self.enqueue("Industrial", wf, coc, pl)
         send = Recorder()
         for job in pu.load_jobs(self.q):
-            job["division"] = "MAG - ITAR"
+            job["meta"]["po_number"] = "EXPORT CONTROLLED 55"
             self.assertEqual(pu.process_job(job, CONFIG, send=send, qdir=self.q, **self.roots)["status"], "blocked")
         self.assertEqual(send.calls, [])
 
-    def test_upload_job_itself_refuses_itar(self):
-        iwf, icoc, ipl = self.wo(self.itar)
-        job = {"division": "MAG - ITAR", "wo_folder": str(iwf), "pdf_path": str(icoc),
-               "doc_type": "CoC", "meta": {}}
+    def test_upload_job_itself_refuses(self):
+        wf, coc, pl = self.wo(self.ind)
+        job = {"division": "Industrial", "wo_folder": str(wf), "pdf_path": str(coc),
+               "doc_type": "CoC", "meta": {"po_number": "USML 4"}}
         send = Recorder()
-        with self.assertRaises(pu.ItarBlocked):
+        with self.assertRaises(pu.UploadBlocked):
             pu.upload_job(job, CONFIG, send=send, **self.roots)
         self.assertEqual(send.calls, [])
 

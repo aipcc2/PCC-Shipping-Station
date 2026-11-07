@@ -11,9 +11,12 @@ How it works
      hourly, for up to 7 days). Jobs the portal refuses for a reason that won't fix itself are marked
      failed and shown to the operator.
 
-ITAR (hard rule): nothing from a MAG - ITAR job is ever sent. The guard (itar_reason) runs when the job
-is queued, again when the worker picks it up, and again right before upload, so even an edited queue file
-can't get an ITAR job out. The portal refuses ITAR jobs as well.
+Which jobs: Industrial AND MAG - ITAR jobs (Sahil, 2026-11-07: the CoC, packing list and serial list are not
+ITAR technical data / CUI). The guard (block_reason) still refuses a job whose division isn't one of the two,
+whose files aren't inside that division's production folder (e.g. an offline Outbox copy, or a folder that
+doesn't match the division), or whose folder/file names or fields carry an export-control marking
+(export controlled, USML, technical data, CUI, 22 CFR 120-130, International Traffic in Arms). It runs when
+the job is queued, again when the worker picks it up, and again right before upload. The portal checks too.
 
 Settings live on each PC (never on the network share, never in git):
   %LOCALAPPDATA%\\PCC Shipping\\portal_upload.json  ->  {"enabled", "station_id", "station_key", "url"}
@@ -32,9 +35,9 @@ import uuid
 from pathlib import Path
 
 DEFAULT_URL = "https://jefedoraeqoevggxevgd.supabase.co/functions/v1/ingest-shipping-docs"
-ALLOWED_DIVISION = "Industrial"
 INDUSTRIAL_ROOT = r"\\PCC2\PCC-I-Shares\Production\Industrial"
 ITAR_ROOT = r"\\PCC2\PCC-I-Shares\Production\MAG - ITAR"
+DIVISIONS = ("Industrial", "MAG - ITAR")   # both go to the portal (Sahil, 2026-11-07)
 
 RETRY_DELAYS = [60, 300, 900, 3600]   # seconds; after the last one, hourly
 GIVE_UP_AFTER = 7 * 24 * 3600         # a job older than this is marked failed
@@ -60,14 +63,19 @@ def config_path():
 
 
 ###############################################################################
-# ITAR GUARD
+# UPLOAD GUARD
 ###############################################################################
 
-_ITAR_WORDS = [
-    (re.compile(r"(^|[^a-z])itar([^a-z]|$)", re.I), "ITAR"),
-    (re.compile(r"international\s+traffic\s+in\s+arms", re.I), "International Traffic in Arms"),
-    (re.compile(r"(^|[^a-z])usml([^a-z]|$)", re.I), "USML"),
+# Markings that mean a document or job carries export-controlled technical data / CUI. Any hit blocks.
+# (The bare word "ITAR" is NOT one of them: it's the MAG - ITAR division's own folder name, and that
+# division's shipping documents are allowed.)
+_CONTROLLED_MARKINGS = [
     (re.compile(r"export[\s-]*controlled", re.I), "export controlled"),
+    (re.compile(r"(^|[^a-z])usml([^a-z]|$)", re.I), "USML"),
+    (re.compile(r"technical[\s-]+data", re.I), "technical data"),
+    (re.compile(r"(^|[^a-z])cui([^a-z]|$)", re.I), "CUI"),
+    (re.compile(r"22\s*cfr\s*12[0-9]", re.I), "22 CFR 120-130"),
+    (re.compile(r"international\s+traffic\s+in\s+arms", re.I), "International Traffic in Arms"),
 ]
 
 
@@ -80,46 +88,53 @@ def _under(path, root):
     return p == r or p.startswith(r + "\\")
 
 
-def itar_reason(division, paths=(), texts=(), industrial_root=INDUSTRIAL_ROOT, itar_root=ITAR_ROOT):
-    """
-    Returns why a job must NOT go to the portal, or None when it may.
-    A job may go only if ALL of these hold:
-      - the division is exactly "Industrial"
-      - every file/folder is inside the Industrial production root (and not the MAG - ITAR root)
-      - no folder name, file name or text field mentions ITAR / USML / export controlled
-    """
-    if division != ALLOWED_DIVISION:
-        return f"division is '{division}', only '{ALLOWED_DIVISION}' jobs go to the portal"
-    for p in paths:
-        if not p:
-            continue
-        if _under(p, itar_root):
-            return f"file is in the MAG - ITAR area: {p}"
-        if not _under(p, industrial_root):
-            return f"file is outside the Industrial production folder: {p}"
-        for part in re.split(r"[\\/]+", str(p)):
-            for rx, label in _ITAR_WORDS:
-                if rx.search(part):
-                    return f"folder or file name mentions {label}: {part}"
-    for t in texts:
-        for rx, label in _ITAR_WORDS:
-            if t and rx.search(str(t)):
-                return f"shipment details mention {label}"
+def _marking(text):
+    for rx, label in _CONTROLLED_MARKINGS:
+        if text and rx.search(str(text)):
+            return label
     return None
 
 
-class ItarBlocked(Exception):
+def block_reason(division, paths=(), texts=(), industrial_root=INDUSTRIAL_ROOT, itar_root=ITAR_ROOT):
+    """
+    Returns why a job must NOT go to the portal, or None when it may.
+    A job may go only if ALL of these hold:
+      - the division is "Industrial" or "MAG - ITAR"
+      - every file/folder is inside THAT division's production folder on the share
+      - no folder name, file name or field carries an export-control marking (_CONTROLLED_MARKINGS)
+    """
+    roots = {"Industrial": industrial_root, "MAG - ITAR": itar_root}
+    if division not in roots:
+        return f"division is '{division}', only {' / '.join(DIVISIONS)} jobs go to the portal"
+    root = roots[division]
+    for p in paths:
+        if not p:
+            continue
+        if not _under(p, root):
+            return f"file is outside the {division} production folder: {p}"
+        for part in re.split(r"[\\/]+", str(p)):
+            hit = _marking(part)
+            if hit:
+                return f"folder or file name is marked {hit}: {part}"
+    for t in texts:
+        hit = _marking(t)
+        if hit:
+            return f"shipment details are marked {hit}"
+    return None
+
+
+class UploadBlocked(Exception):
     pass
 
 
 def _check_job(job, industrial_root=INDUSTRIAL_ROOT, itar_root=ITAR_ROOT):
     meta = job.get("meta") or {}
-    reason = itar_reason(job.get("division"),
-                         paths=[job.get("wo_folder"), job.get("pdf_path")],
-                         texts=list(meta.values()),
-                         industrial_root=industrial_root, itar_root=itar_root)
+    reason = block_reason(job.get("division"),
+                          paths=[job.get("wo_folder"), job.get("pdf_path")],
+                          texts=list(meta.values()),
+                          industrial_root=industrial_root, itar_root=itar_root)
     if reason:
-        raise ItarBlocked(reason)
+        raise UploadBlocked(reason)
 
 
 ###############################################################################
@@ -189,7 +204,7 @@ def enqueue_shipment(division, wo_folder, wo, eng, coc_pdf=None, coc_data=None,
     Queues the shipment's PDFs (already written next to the .xlsx files) for the portal.
     Never raises, never blocks. Returns (status, message) for the Close summary:
       ("queued", "...")   jobs written; the background uploader will send them
-      ("blocked", "...")  ITAR / not allowed: nothing queued
+      ("blocked", "...")  not allowed (see block_reason): nothing queued
       ("off", "...")      upload not turned on for this PC
       ("none", "...")     nothing to send
       ("error", "...")    couldn't write the queue (shipping is unaffected)
@@ -198,7 +213,7 @@ def enqueue_shipment(division, wo_folder, wo, eng, coc_pdf=None, coc_data=None,
         coc_data = coc_data or {}
         packing_data = packing_data or {}
         docs = [(p, t) for p, t in ((coc_pdf, DOC_COC), (packing_pdf, DOC_PACKING), (serials_pdf, DOC_SERIALS)) if p]
-        reason = itar_reason(division, paths=[wo_folder] + [p for p, _ in docs],
+        reason = block_reason(division, paths=[wo_folder] + [p for p, _ in docs],
                              texts=[wo, eng, coc_data.get("po"), packing_data.get("po"), packing_data.get("packing_no")],
                              industrial_root=industrial_root, itar_root=itar_root)
         if reason:
@@ -301,7 +316,7 @@ def ping(config, send=http_send):
 
 
 def upload_job(job, config, send=http_send, industrial_root=INDUSTRIAL_ROOT, itar_root=ITAR_ROOT):
-    """Sends one job's PDF. Returns (outcome, message, response). Raises ItarBlocked for ITAR jobs."""
+    """Sends one job's PDF. Returns (outcome, message, response). Raises UploadBlocked for a blocked job."""
     _check_job(job, industrial_root, itar_root)  # last line of defence, right before anything leaves the PC
     pdf = Path(job["pdf_path"])
     data = pdf.read_bytes()
@@ -335,7 +350,7 @@ def process_job(job, config, send=http_send, now=None, qdir=None,
         if not Path(job["pdf_path"]).is_file():
             raise FileNotFoundError(f"The PDF isn't there any more: {job['pdf_path']}")
         outcome, msg, resp = upload_job(job, config, send, industrial_root, itar_root)
-    except ItarBlocked as e:
+    except UploadBlocked as e:
         outcome, msg, resp = "blocked", f"Not sent: {e}", None
     except FileNotFoundError as e:
         outcome, msg, resp = "failed", str(e), None

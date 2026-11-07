@@ -43,7 +43,7 @@ See [CONTRIBUTING.md](./CONTRIBUTING.md) for the branch and pull request workflo
 
 - `app_logic.py` — main application source (single file; the EXE is built from it)
 - `pdf_docs.py` — draws the PDF copy of the CoC, Packing List and Serial list (no Excel needed)
-- `portal_upload.py` — sends those PDFs to the PCC Customer Portal (Industrial only; see below)
+- `portal_upload.py` — sends those PDFs to the PCC Customer Portal (Industrial and MAG - ITAR; see below)
 - `PCC Shipping App.spec` — PyInstaller recipe used by `build_exe.bat` (bundles the two modules above into the one exe)
 - `PROJECT_NOTES.md` — dated change log and design notes (read this first)
 - `tests/` — test suites (`python tests/test_slip_labels.py` etc.; set the `SCRIPTS` path at the top of each to your clone)
@@ -65,11 +65,12 @@ fails shows "+ PDF FAILED" in the close summary but never stops the close. If yo
 **Portal upload.** The CoC, Packing List and Serial list PDFs are then sent to the PCC Customer Portal so
 the customer sees them on their order:
 
-- **Industrial jobs only. MAG - ITAR jobs are never sent.** `portal_upload.itar_reason()` refuses a job
-  unless the division is exactly "Industrial", every file is under the Industrial production share (not
-  MAG - ITAR), and no folder name, file name or field mentions ITAR / USML / export controlled. Checked
-  when the job is queued, when the uploader picks it up, and right before upload. Offline (Outbox)
-  shipments are not sent. The portal refuses ITAR jobs too.
+- **Industrial and MAG - ITAR jobs** (Sahil, 2026-11-07: these shipping documents are not ITAR technical
+  data / CUI). `portal_upload.block_reason()` still refuses a job unless the division is one of the two,
+  every file is inside THAT division's production share folder, and no folder name, file name or field is
+  marked export controlled / USML / technical data / CUI / 22 CFR 120-130. Checked when the job is
+  queued, when the uploader picks it up, and right before upload. Offline (Outbox) shipments are not
+  sent. The portal checks the same markings.
 - **Never blocks shipping.** Close only writes a small job file on the PC; a background thread uploads.
   Retries 1 min, 5 min, 15 min, then hourly, up to 7 days.
 - **Visible status.** Footer (bottom right): "Portal: ✓ 3 sent today · 1 waiting · ⚠ 1 failed"; click
