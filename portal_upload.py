@@ -18,17 +18,18 @@ doesn't match the division), or whose folder/file names or fields carry an expor
 (export controlled, USML, technical data, CUI, 22 CFR 120-130, International Traffic in Arms). It runs when
 the job is queued, again when the worker picks it up, and again right before upload. The portal checks too.
 
-Settings live on each PC (never on the network share, never in git):
-  %LOCALAPPDATA%\\PCC Shipping\\portal_upload.json  ->  {"enabled", "key", "url"}
-There is ONE shipping station, so there is one key (the same value as the portal's SHIPPING_UPLOAD_KEY
-secret). It's what proves an upload really comes from the shipping app.
-Upload is OFF until an admin turns it on in Admin -> Portal upload.
+The upload key is BUILT INTO the app (Sahil, 2026-11-07: nothing to set up on the shipping PC). At build
+time, `portal_key.txt` next to app_logic.py is bundled into the exe (see "PCC Shipping App.spec"); it holds
+the same value as the portal's Supabase secret SHIPPING_UPLOAD_KEY. The file is git-ignored, so the key
+never goes to GitHub. With the key built in, upload is simply on; an exe built without it doesn't upload
+(the footer says so). The only thing kept on the PC is the upload queue (%LOCALAPPDATA%\\PCC Shipping\\).
 """
 
 import datetime
 import json
 import os
 import re
+import sys
 import threading
 import time
 import urllib.error
@@ -43,6 +44,11 @@ DIVISIONS = ("Industrial", "MAG - ITAR")   # both go to the portal (Sahil, 2026-
 
 RETRY_DELAYS = [60, 300, 900, 3600]   # seconds; after the last one, hourly
 GIVE_UP_AFTER = 7 * 24 * 3600         # a job older than this is marked failed
+# Not every work order is in the portal (Sahil, 2026-11-07) — that's normal, not a failure. The portal
+# answers code "work_order_not_in_portal"; the app keeps trying quietly for a day (in case the Monday
+# sync hasn't caught up with a brand-new order), then marks the job "skipped": no pop-up, no red count.
+NOT_IN_PORTAL = "work_order_not_in_portal"
+NOT_IN_PORTAL_WAIT = 24 * 3600
 HTTP_TIMEOUT = 60
 
 DOC_COC = "CoC"
@@ -60,8 +66,17 @@ def queue_dir():
     return local_dir() / "portal_queue"
 
 
-def config_path():
-    return local_dir() / "portal_upload.json"
+KEY_FILE = "portal_key.txt"
+
+
+def _key_file_candidates():
+    """Where the built-in key lives: inside the exe (PyInstaller unpacks bundled files to sys._MEIPASS),
+    or next to this file when running from source."""
+    out = []
+    if hasattr(sys, "_MEIPASS"):
+        out.append(Path(sys._MEIPASS) / KEY_FILE)
+    out.append(Path(__file__).resolve().parent / KEY_FILE)
+    return out
 
 
 ###############################################################################
@@ -143,23 +158,21 @@ def _check_job(job, industrial_root=INDUSTRIAL_ROOT, itar_root=ITAR_ROOT):
 # SETTINGS
 ###############################################################################
 
-def load_config():
-    try:
-        with open(config_path(), encoding="utf-8") as f:
-            c = json.load(f)
-    except Exception:
-        c = {}
-    return {
-        "enabled": bool(c.get("enabled")),
-        "key": str(c.get("key") or ""),
-        "url": str(c.get("url") or DEFAULT_URL),
-    }
+def built_in_key(candidates=None):
+    """The upload key built into this app, or '' when this build has none."""
+    for path in (candidates if candidates is not None else _key_file_candidates()):
+        try:
+            key = Path(path).read_text(encoding="utf-8").strip()
+            if key:
+                return key
+        except Exception:
+            pass
+    return ""
 
 
-def save_config(c):
-    local_dir().mkdir(parents=True, exist_ok=True)
-    with open(config_path(), "w", encoding="utf-8") as f:
-        json.dump(c, f, indent=2)
+def load_config(candidates=None):
+    key = built_in_key(candidates)
+    return {"enabled": bool(key), "key": key, "url": DEFAULT_URL}
 
 
 def config_ready(c):
@@ -302,19 +315,6 @@ def classify(status, body):
     return "failed"
 
 
-def ping(config, send=http_send):
-    """Checks the key with the portal. Returns (ok, message)."""
-    body, ctype = _multipart({"ping": "1"}, "none", "none.pdf", b"")
-    status, data = send(config["url"], {"x-shipping-key": config["key"],
-                                        "Content-Type": ctype}, body)
-    if status == 200 and (data or {}).get("pong"):
-        return True, "Connected to the Customer Portal."
-    data = data or {}
-    if status == 404 and not data.get("error"):
-        return False, "The portal's upload function isn't set up yet (HTTP 404)."
-    return False, data.get("error") or data.get("message") or f"No answer from the portal (HTTP {status})."
-
-
 def upload_job(job, config, send=http_send, industrial_root=INDUSTRIAL_ROOT, itar_root=ITAR_ROOT):
     """Sends one job's PDF. Returns (outcome, message, response). Raises UploadBlocked for a blocked job."""
     _check_job(job, industrial_root, itar_root)  # last line of defence, right before anything leaves the PC
@@ -358,7 +358,14 @@ def process_job(job, config, send=http_send, now=None, qdir=None,
     job["attempts"] = job.get("attempts", 0) + 1
     job["last_try_at"] = now
     job["last_error"] = "" if outcome == "done" else msg
-    if outcome == "done":
+    job["last_code"] = (resp or {}).get("code") or ""
+    not_in_portal = job["last_code"] == NOT_IN_PORTAL
+    if not_in_portal:
+        job["last_error"] = "This work order isn't in the Customer Portal."
+    if not_in_portal and now - job.get("created_at", now) > NOT_IN_PORTAL_WAIT:
+        job["status"] = "skipped"
+        job["last_error"] = "Not in the Customer Portal — skipped (normal for orders that aren't on the portal)."
+    elif outcome == "done":
         job["status"] = "done"
         job["document_id"] = (resp or {}).get("document_id")
     elif outcome in ("failed", "blocked"):
@@ -384,7 +391,7 @@ def prune(qdir=None, keep_days=30):
     """Removes finished jobs older than keep_days so the queue folder stays small."""
     cutoff = _now() - keep_days * 86400
     for job in load_jobs(qdir):
-        if job.get("status") in ("done", "blocked") and job.get("last_try_at", 0) < cutoff:
+        if job.get("status") in ("done", "blocked", "skipped") and job.get("last_try_at", 0) < cutoff:
             try:
                 (Path(qdir or queue_dir()) / f"{job['id']}.json").unlink()
             except Exception:
@@ -435,10 +442,11 @@ class PortalUploader(threading.Thread):
 
 
 def summary(jobs=None):
-    """Counts for the footer: waiting, failed, sent today."""
+    """Counts for the footer: waiting, failed, sent today. Jobs whose work order isn't in the portal are
+    not counted as waiting (that's normal); skipped jobs aren't counted at all."""
     jobs = load_jobs() if jobs is None else jobs
     today = datetime.date.today()
-    waiting = sum(1 for j in jobs if j.get("status") == "pending")
+    waiting = sum(1 for j in jobs if j.get("status") == "pending" and j.get("last_code") != NOT_IN_PORTAL)
     failed = sum(1 for j in jobs if j.get("status") == "failed")
     sent_today = sum(1 for j in jobs if j.get("status") == "done"
                      and datetime.date.fromtimestamp(j.get("last_try_at", 0)) == today)

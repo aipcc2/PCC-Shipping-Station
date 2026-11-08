@@ -72,10 +72,14 @@ the customer sees them on their order:
   queued, when the uploader picks it up, and right before upload. Offline (Outbox) shipments are not
   sent. The portal checks the same markings.
 - **Never blocks shipping.** Close only writes a small job file on the PC; a background thread uploads.
-  Retries 1 min, 5 min, 15 min, then hourly, up to 7 days.
+  Retries 1 min, 5 min, 15 min, then hourly, up to 7 days. Not every work order is on the portal: one that
+  isn't is retried quietly for a day (in case Monday hasn't synced it yet), then skipped — no pop-up,
+  not counted as waiting or failed.
 - **Visible status.** Footer (bottom right): "Portal: ✓ 3 sent today · 1 waiting · ⚠ 1 failed"; click
   it for the list and **Retry now**. A failed upload pops up a warning so the office can upload by hand.
-- **Off until set up.** Admin → Portal upload: enter the upload key (from the portal admin; same value as
-  the portal's `SHIPPING_UPLOAD_KEY` secret), Test connection, turn on, Save. Stored only on that PC in
-  `%LOCALAPPDATA%\PCC Shipping\portal_upload.json`; queue in `%LOCALAPPDATA%\PCC Shipping\portal_queue\`.
+- **Nothing to set up on the shipping PC.** The upload key is built into the exe: keep `portal_key.txt`
+  (one line, the same value as the portal's Supabase secret `SHIPPING_UPLOAD_KEY`) next to `app_logic.py`
+  when you run `build_exe.bat`, and the spec bundles it. It is git-ignored, so it never goes to GitHub. Built
+  without it, the app works as before and just doesn't upload (footer: "Portal upload: off (no key in this
+  build)"). The upload queue lives in `%LOCALAPPDATA%\PCC Shipping\portal_queue\`.
 - Tests: `py -3.12 -m unittest tests.test_pdf_docs tests.test_portal_upload -v` (run from the repo folder).

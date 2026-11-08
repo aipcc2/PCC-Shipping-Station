@@ -151,6 +151,31 @@ class GuardTests(Env):
         self.assertEqual(send.calls, [])
 
 
+class BuiltInKeyTests(Env):
+    """The upload key is built into the app (portal_key.txt bundled at build time): nothing to set up on the PC."""
+
+    def test_key_file_turns_upload_on(self):
+        f = Path(self.tmp.name) / "portal_key.txt"
+        f.write_text("  " + KEY + "\r\n", encoding="utf-8")   # spaces / newline around it are fine
+        c = pu.load_config([f])
+        self.assertEqual(c, {"enabled": True, "key": KEY, "url": pu.DEFAULT_URL})
+        self.assertTrue(pu.config_ready(c))
+
+    def test_no_key_in_the_build_means_off(self):
+        missing = Path(self.tmp.name) / "nope.txt"
+        empty = Path(self.tmp.name) / "empty.txt"
+        empty.write_text("   ", encoding="utf-8")
+        for candidates in ([missing], [empty], []):
+            with self.subTest(candidates=candidates):
+                c = pu.load_config(candidates)
+                self.assertFalse(c["enabled"])
+                self.assertFalse(pu.config_ready(c))
+
+    def test_key_is_never_committed(self):
+        repo = Path(__file__).resolve().parent.parent
+        self.assertIn("portal_key.txt", (repo / ".gitignore").read_text(encoding="utf-8"))
+
+
 class QueueTests(Env):
     def test_queues_coc_packing_list_and_serial_list(self):
         wf, coc, pl = self.wo(self.ind)
@@ -206,9 +231,21 @@ class UploadTests(Env):
         self.assertEqual(job["status"], "pending")
         self.assertEqual(job["next_try_at"], now + 60)
 
-    def test_work_order_not_in_portal_yet_retries(self):
-        job = self.run_one(Recorder(status=404, body={"ok": False, "code": "work_order_not_in_portal", "retry": True}))
+    def test_work_order_not_in_portal_is_quiet_then_skipped(self):
+        """Not every work order is on the portal: retry quietly for a day, then skip — never a failure."""
+        answer = Recorder(status=404, body={"ok": False, "code": "work_order_not_in_portal", "retry": True})
+        job = self.run_one(answer)
         self.assertEqual(job["status"], "pending")
+        self.assertEqual(pu.summary(pu.load_jobs(self.q)), {"waiting": 0, "failed": 0, "sent_today": 0})
+        job["created_at"] -= 25 * 3600
+        job = pu.process_job(job, CONFIG, send=answer, qdir=self.q, **self.roots)
+        self.assertEqual(job["status"], "skipped")
+        self.assertIn("Not in the Customer Portal", job["last_error"])
+        self.assertEqual(pu.summary(pu.load_jobs(self.q)), {"waiting": 0, "failed": 0, "sent_today": 0})
+
+    def test_other_waiting_jobs_still_count(self):
+        self.run_one(Recorder(status=503, body={}))
+        self.assertEqual(pu.summary(pu.load_jobs(self.q))["waiting"], 1)
 
     def test_refusal_is_marked_failed(self):
         job = self.run_one(Recorder(status=409, body={"ok": False, "code": "po_mismatch", "error": "PO doesn't match", "retry": False}))

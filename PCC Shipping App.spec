@@ -27,6 +27,11 @@ APP_NAME = "PCC Shipping App"
 datas = []
 if os.path.exists('logo.png'):
     datas.append(('logo.png', '.'))
+# Customer Portal upload key (portal_upload.py): same value as the portal's Supabase secret
+# SHIPPING_UPLOAD_KEY. Keep portal_key.txt next to app_logic.py when you build; it is git-ignored.
+# Built without it, the app just doesn't upload (footer: "Portal upload: off (no key in this build)").
+if os.path.exists('portal_key.txt'):
+    datas.append(('portal_key.txt', '.'))
 binaries = []
 
 # app_logic.py imports these lazily (inside functions); list them so the
